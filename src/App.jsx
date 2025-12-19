@@ -2162,17 +2162,59 @@ function App() {
       jsonContentLength: uploadedFile?.json_content?.length || 0
     })
     
-    // Reload files list for the dropdown
+    // Reload files list from backend for the dropdown
     try {
-      const files = getActiveFiles() // Get active files from localStorage
-      setSpinFiles(files)
+      const backendFiles = await getSpinFiles()
+      if (backendFiles && Array.isArray(backendFiles)) {
+        const activeFiles = backendFiles.filter(f => f.active !== false)
+        setSpinFiles(activeFiles)
+        // Sync to localStorage for offline support
+        const { saveFile } = require('./utils/storage')
+        backendFiles.forEach(file => {
+          try {
+            saveFile(file)
+          } catch (e) {
+            console.warn('Failed to sync file to localStorage:', e)
+          }
+        })
+      } else {
+        // Fallback to localStorage
+        const files = getActiveFiles()
+        setSpinFiles(files)
+      }
     } catch (error) {
-      console.error('Failed to reload files list:', error)
-      // Continue even if reload fails
+      console.error('Failed to reload files list from backend, using localStorage:', error)
+      // Fallback to localStorage
+      try {
+        const files = getActiveFiles()
+        setSpinFiles(files)
+      } catch (fallbackError) {
+        console.error('Failed to reload files list:', fallbackError)
+      }
     }
       
       // Auto-select the uploaded file and load its data onto the wheel
       if (uploadedFile) {
+      // Reload files from backend first to get latest data
+      try {
+        const backendFiles = await getSpinFiles()
+        if (backendFiles && Array.isArray(backendFiles)) {
+          const activeFiles = backendFiles.filter(f => f.active !== false)
+          setSpinFiles(activeFiles)
+          // Sync to localStorage for offline support
+          backendFiles.forEach(file => {
+            try {
+              const { saveFile } = require('./utils/storage')
+              saveFile(file)
+            } catch (e) {
+              console.warn('Failed to sync file to localStorage:', e)
+            }
+          })
+        }
+      } catch (backendError) {
+        console.warn('Failed to reload from backend:', backendError)
+      }
+      
       // Check if file has json_content (required for loading entries)
       if (uploadedFile.json_content && Array.isArray(uploadedFile.json_content)) {
         console.log('Loading file directly to wheel:', {
@@ -2186,27 +2228,40 @@ function App() {
         handleSelectSpinFile(uploadedFile)
         console.log('handleSelectSpinFile called, waiting for state update...')
       } else if (uploadedFile.id) {
-        // File doesn't have json_content, try to find it in admin files list (which has json_content)
+        // File doesn't have json_content, try to fetch from backend
         try {
-          console.log('File missing json_content, fetching from admin API...')
-          const adminFiles = getStoredFiles()
-          const fileToLoad = adminFiles.find(f => f.id === uploadedFile.id)
+          console.log('File missing json_content, fetching from backend API...')
+          const backendFiles = await getSpinFiles()
+          const fileToLoad = backendFiles?.find(f => f.id === uploadedFile.id)
+          
           if (fileToLoad && fileToLoad.json_content && Array.isArray(fileToLoad.json_content)) {
-            console.log('Found file in admin list, loading:', {
+            console.log('Found file in backend, loading:', {
               fileId: fileToLoad.id,
               entriesCount: fileToLoad.json_content.length
             })
-          handleSelectSpinFile(fileToLoad)
-        } else {
-            console.error('File not found or missing json_content in admin list:', {
-              fileId: uploadedFile.id,
-              found: !!fileToLoad,
-              hasJsonContent: !!fileToLoad?.json_content
-            })
-            alert('Failed to load file: File data not available. Please try selecting the file manually from the dropdown.')
+            handleSelectSpinFile(fileToLoad)
+          } else {
+            // Fallback to localStorage
+            const adminFiles = getStoredFiles()
+            const fileToLoad = adminFiles.find(f => f.id === uploadedFile.id)
+            if (fileToLoad && fileToLoad.json_content && Array.isArray(fileToLoad.json_content)) {
+              console.log('Found file in localStorage, loading:', {
+                fileId: fileToLoad.id,
+                entriesCount: fileToLoad.json_content.length
+              })
+              handleSelectSpinFile(fileToLoad)
+            } else {
+              console.error('File not found or missing json_content:', {
+                fileId: uploadedFile.id,
+                foundInBackend: !!backendFiles?.find(f => f.id === uploadedFile.id),
+                foundInLocal: !!fileToLoad,
+                hasJsonContent: !!fileToLoad?.json_content
+              })
+              alert('Failed to load file: File data not available. Please try selecting the file manually from the dropdown.')
+            }
           }
         } catch (error) {
-          console.error('Failed to load file from admin API:', error)
+          console.error('Failed to load file from backend:', error)
           alert('Failed to load file. Please try selecting the file manually from the dropdown.')
         }
       } else {

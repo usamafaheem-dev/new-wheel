@@ -367,8 +367,29 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
       // Only reload entries and show success if at least one file was uploaded
       if (uploadedFiles.length > 0) {
         setSuccess('All files uploaded successfully!')
+        // Reload files from backend to get latest data
+        await loadUploadRows()
         // Reload entries for the publish section
         await loadEntries()
+        // Notify parent component to reload files from backend
+        if (onFileUploaded && uploadedFiles.length > 0) {
+          // Get the latest file from backend
+          try {
+            const latestFiles = await getAdminSpinFiles()
+            if (latestFiles && latestFiles.length > 0) {
+              const latestFile = latestFiles.find(f => f.id === uploadedFiles[uploadedFiles.length - 1].id) || latestFiles[latestFiles.length - 1]
+              if (latestFile && latestFile.json_content && Array.isArray(latestFile.json_content)) {
+                onFileUploaded(latestFile)
+              }
+            }
+          } catch (e) {
+            console.warn('Failed to notify parent with backend file:', e)
+            // Fallback to uploaded file
+            if (uploadedFiles[uploadedFiles.length - 1]) {
+              onFileUploaded(uploadedFiles[uploadedFiles.length - 1])
+            }
+          }
+        }
       } else {
         // If no files were uploaded, show error but don't clear existing entries
         setError('No files were uploaded. Please check the error messages above.')
@@ -619,27 +640,50 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
     setIsLoadingEntries(true)
     setError('')
     try {
-      // Load files from localStorage instead of backend
-      const files = getStoredFiles()
-      
-      if (!files || files.length === 0) {
-        // Don't clear existing entries if no files found - just show error
-        setError('No files found. Please upload an Excel file.')
-        setIsLoadingEntries(false)
-        return
+      // Try to load files from backend API first
+      let files = []
+      try {
+        const backendFiles = await getAdminSpinFiles()
+        if (backendFiles && Array.isArray(backendFiles)) {
+          files = backendFiles
+          // Sync backend data to localStorage for offline support
+          backendFiles.forEach(file => {
+            try {
+              saveFile(file) // Save to localStorage
+            } catch (e) {
+              console.warn('Failed to sync file to localStorage:', e)
+            }
+          })
+          console.log('📥 Files loaded from backend API:', {
+            totalFiles: files.length,
+            filesInfo: files.map(f => ({
+              id: f.id,
+              filename: f.filename || f.name,
+              jsonContentLength: f.json_content?.length || 0,
+              hasJsonContent: !!f.json_content,
+              isArray: Array.isArray(f.json_content)
+            }))
+          })
+        }
+      } catch (backendError) {
+        console.warn('Failed to load from backend, falling back to localStorage:', backendError)
+        // Fallback to localStorage if backend fails
+        files = getStoredFiles()
+        console.log('📥 Files loaded from localStorage (fallback):', {
+          totalFiles: files.length
+        })
       }
       
-      // Log files loaded from localStorage
-      console.log('📥 Files loaded from localStorage:', {
-        totalFiles: files.length,
-        filesInfo: files.map(f => ({
-          id: f.id,
-          filename: f.filename || f.name,
-          jsonContentLength: f.json_content?.length || 0,
-          hasJsonContent: !!f.json_content,
-          isArray: Array.isArray(f.json_content)
-        }))
-      })
+      // If no files from backend, try localStorage
+      if (!files || files.length === 0) {
+        files = getStoredFiles()
+        if (!files || files.length === 0) {
+          // Don't clear existing entries if no files found - just show error
+          setError('No files found. Please upload an Excel file.')
+          setIsLoadingEntries(false)
+          return
+        }
+      }
       
       // Get removed entries from localStorage
       const removedEntries = getRemovedEntries()
