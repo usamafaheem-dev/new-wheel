@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { FiUpload, FiX, FiFile, FiImage, FiCheck, FiAlertCircle, FiSearch, FiSend, FiLogOut, FiShuffle, FiRefreshCw } from 'react-icons/fi'
 import { parseExcelFile, imageToBase64 } from '../utils/excelParser'
-import { uploadSpinFile, deleteSpinFile, getAdminSpinFiles } from '../services/api'
+import { uploadSpinFile, deleteSpinFile, getAdminSpinFiles, checkPassword, toggleSpinFileActive, updatePassword } from '../services/api'
+import { getStoredFiles, saveFile, deleteFile, toggleFileActive, checkPassword as checkPasswordLocal, setPassword as setPasswordLocal } from '../utils/storage'
 
 const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
   const [password, setPassword] = useState('')
@@ -213,12 +214,10 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
   // Toggle active status
   const handleToggleActive = async (id) => {
     try {
-      // Use localStorage only
-      const files = getStoredFiles()
-      const file = files.find(f => f.id === id)
-      if (file) {
-        const newActiveStatus = !(file.active !== false) // Toggle active status
-        toggleFileActive(id, newActiveStatus)
+      // Use backend API
+      const updatedFile = await toggleSpinFileActive(id)
+      if (updatedFile) {
+        const newActiveStatus = updatedFile.active !== false
         setUploadRows((prev) =>
           prev.map((row) =>
             row.id === id ? { ...row, active: newActiveStatus } : row
@@ -227,7 +226,7 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
       }
     } catch (error) {
       console.error('Error toggling active:', error)
-      setError('Failed to toggle active status')
+      setError('Failed to toggle active status: ' + (error.message || 'Unknown error'))
     }
   }
   
@@ -704,10 +703,10 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
     setPasswordError('')
     
     try {
-      // Use localStorage only - no API calls
-      const isValid = checkPasswordLocal(password)
+      // Use backend API to check password
+      const result = await checkPassword(password)
       
-      if (isValid) {
+      if (result && result.valid) {
         setIsAuthenticated(true)
         setError('')
         setPassword('') // Clear password field after successful login
@@ -716,7 +715,7 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
       }
     } catch (error) {
       console.error('Password check error:', error)
-      setPasswordError('Failed to verify password')
+      setPasswordError('Failed to verify password: ' + (error.message || 'Unknown error'))
     }
   }
 
@@ -954,16 +953,22 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
     }
     
     // Verify old password
-    if (!checkPasswordLocal(oldPassword)) {
-      setPasswordChangeError('Current password is incorrect')
+    try {
+      const passwordCheck = await checkPassword(oldPassword)
+      if (!passwordCheck || !passwordCheck.valid) {
+        setPasswordChangeError('Current password is incorrect')
+        return
+      }
+    } catch (error) {
+      setPasswordChangeError('Failed to verify current password')
       return
     }
     
     setIsChangingPassword(true)
     
     try {
-      // Set new password
-      setPasswordLocal(newPassword)
+      // Use backend API to update password
+      await updatePassword(oldPassword, newPassword)
       setPasswordChangeSuccess('Password changed successfully!')
       
       // Clear form
@@ -977,7 +982,7 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
         setShowPasswordChangeModal(false)
       }, 2000)
     } catch (error) {
-      setPasswordChangeError('Failed to change password: ' + error.message)
+      setPasswordChangeError('Failed to change password: ' + (error.message || 'Unknown error'))
     } finally {
       setIsChangingPassword(false)
     }

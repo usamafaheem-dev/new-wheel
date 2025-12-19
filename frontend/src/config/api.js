@@ -1,5 +1,5 @@
 // API Configuration
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://wheel-pearl-one.vercel.app/api'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api'
 
 export const API_ENDPOINTS = {
   SPINS: {
@@ -12,6 +12,7 @@ export const API_ENDPOINTS = {
     CHECK_PASSWORD: `${API_BASE_URL}/spins/check-password/`,
     ADMIN_LIST: `${API_BASE_URL}/spins/admin-list/`,
     SET_FIXED_WINNER: (id) => `${API_BASE_URL}/spins/set-fixed-winner/${id}/`,
+    UPDATE_PASSWORD: `${API_BASE_URL}/spins/update-password/`,
   }
 }
 

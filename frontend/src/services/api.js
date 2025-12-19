@@ -110,3 +110,11 @@ export const setFixedWinner = async (spinFileId, winnerTicket) => {
   })
 }
 
+// Update admin password
+export const updatePassword = async (oldPassword, newPassword) => {
+  return apiCall(API_ENDPOINTS.SPINS.UPDATE_PASSWORD, {
+    method: 'POST',
+    body: JSON.stringify({ oldPassword, newPassword }),
+  })
+}
+
