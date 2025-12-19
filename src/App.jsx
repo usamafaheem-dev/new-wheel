@@ -108,6 +108,13 @@ function App() {
   const animationFrameRef = useRef(null)
   const animationCompletedRef = useRef(false) // Track if animation is completed
   const isFrozenRef = useRef(false) // Track if wheel is frozen
+  const fixedBatchRef = useRef(null) // Store the batch used for fixed winner rotation
+  const randomBatchRef = useRef(null) // Store the batch used for random spin (to ensure consistency)
+  
+  // State for displayed names (100 entries at a time)
+  const [displayedNames, setDisplayedNames] = useState([])
+  // State to track fixed winner name for current spin (so it appears in every batch)
+  const [fixedWinnerName, setFixedWinnerName] = useState(null)
 
   // Audio Context for zero-latency synthetic sounds
   const audioContextRef = useRef(null)
@@ -310,6 +317,10 @@ function App() {
     isFrozenRef.current = false
     animationCompletedRef.current = false
     winnerProcessedRef.current = false
+    fixedBatchRef.current = null // Clear fixed batch ref
+    randomBatchRef.current = null // Clear random batch ref
+    // Clear fixed winner name when starting new spin
+    setFixedWinnerName(null)
 
     setIsSpinning(true)
 
@@ -406,12 +417,31 @@ function App() {
               winnerId: winnerForThisSpin.winnerId,
               winnerName: winnerForThisSpin.name,
               winnerTicket: winnerForThisSpin.ticketNumber,
-              nameToTicketMapSample: Object.entries(nameToTicketMap).slice(0, 10).map(([n, t]) => ({ name: n, ticket: t }))
+              nameToTicketMapSample: Object.entries(nameToTicketMap).slice(0, 10).map(([n, t]) => ({ name: n, ticket: t })),
+              ticketToIndexMapSample: Object.entries(ticketToIndexMap).slice(0, 10).map(([t, i]) => ({ ticket: t, index: i }))
             })
             
-            for (let i = 0; i < names.length; i++) {
-              const name = names[i]
-              const ticketNumber = nameToTicketMap[name] // Get ticket from mapping (can be undefined)
+            // FIRST: Try direct ticket-to-index lookup (fastest and most reliable)
+            if (winnerForThisSpin.ticketNumber && ticketToIndexMap) {
+              const normalizedWinnerTicket = String(winnerForThisSpin.ticketNumber).trim()
+              const directIndex = ticketToIndexMap[normalizedWinnerTicket]
+              
+              if (directIndex !== undefined && directIndex !== null && directIndex >= 0 && directIndex < names.length) {
+                targetWinnerIndex = directIndex
+                console.log('✅ FAST MATCH by ticketToIndexMap:', {
+                  ticket: normalizedWinnerTicket,
+                  index: directIndex,
+                  name: names[directIndex]
+                })
+                // Don't break - continue to verify with other methods, but this is the primary match
+              }
+            }
+            
+            // If not found by direct lookup, search through names array
+            if (targetWinnerIndex === null) {
+              for (let i = 0; i < names.length; i++) {
+                const name = names[i]
+                const ticketNumber = nameToTicketMap[name] // Get ticket from mapping (can be undefined)
               
               // Log each entry being checked
               if (i < 5 || (ticketNumber && String(ticketNumber).trim() === String(winnerForThisSpin.ticketNumber || '').trim())) {
@@ -522,6 +552,7 @@ function App() {
                   break
                 }
               }
+              }
             }
             
             console.log('Fixed winner lookup:', {
@@ -606,17 +637,118 @@ function App() {
       }
     }
     
+    // Set fixed winner name if found (so it appears in every batch)
+    let fixedWinnerDisplayedIndex = null
+    let finalDisplayedNamesForRotation = null
+    
+    if (targetWinnerIndex !== null && targetWinnerIndex >= 0 && shouldUseFixedWinner && names[targetWinnerIndex]) {
+      const winnerName = names[targetWinnerIndex]
+      setFixedWinnerName(winnerName)
+      console.log('Fixed winner name set for batch inclusion:', winnerName)
+      
+      // CRITICAL: Synchronously prepare displayedNames with fixed winner BEFORE calculating rotation
+      // This ensures the fixed winner is always in the batch and at a known position
+      if (names.length > 100) {
+        // Get current displayedNames
+        let currentDisplayed = displayedNames.length > 0 ? [...displayedNames] : []
+        
+        // If fixed winner not in current displayed names, ensure it's added at a known position
+        if (!currentDisplayed.includes(winnerName)) {
+          // Remove winner if it exists elsewhere, then add at position 0 (first position)
+          currentDisplayed = currentDisplayed.filter(n => n !== winnerName)
+          // Ensure we have exactly 100 entries with fixed winner at position 0
+          if (currentDisplayed.length >= 99) {
+            currentDisplayed = [winnerName, ...currentDisplayed.slice(0, 99)]
+          } else {
+            // If we don't have enough, fill with random entries
+            const remainingNames = names.filter(name => name !== winnerName)
+            const shuffled = [...remainingNames].sort(() => Math.random() - 0.5)
+            currentDisplayed = [winnerName, ...shuffled.slice(0, 99)]
+          }
+        }
+        
+        // Ensure fixed winner is at position 0 (first position) for consistent rotation calculation
+        const winnerIndexInCurrent = currentDisplayed.indexOf(winnerName)
+        if (winnerIndexInCurrent !== 0 && winnerIndexInCurrent !== -1) {
+          // Move winner to position 0
+          currentDisplayed.splice(winnerIndexInCurrent, 1)
+          currentDisplayed.unshift(winnerName)
+          // Ensure we still have 100 entries
+          if (currentDisplayed.length > 100) {
+            currentDisplayed = currentDisplayed.slice(0, 100)
+          }
+        } else if (winnerIndexInCurrent === -1) {
+          // Winner not found, add at position 0
+          currentDisplayed = [winnerName, ...currentDisplayed.filter(n => n !== winnerName).slice(0, 99)]
+        }
+        
+        // CRITICAL: Update state immediately and use this exact batch for rotation calculation
+        // This ensures the wheel displays exactly what we calculate rotation for
+        // Force fixed winner to position 0
+        currentDisplayed = currentDisplayed.filter(n => n !== winnerName)
+        currentDisplayed.unshift(winnerName)
+        currentDisplayed = currentDisplayed.slice(0, 100)
+        
+        finalDisplayedNamesForRotation = currentDisplayed
+        fixedWinnerDisplayedIndex = 0 // Always at position 0 for consistency
+        
+        // CRITICAL: Store this batch in a ref FIRST, before updating state
+        // This ensures the batch is locked before any other code can change it
+        fixedBatchRef.current = [...currentDisplayed]
+        
+        // Update state - this will be the batch shown on the wheel
+        // Use setTimeout to ensure ref is set before state update triggers any effects
+        setDisplayedNames(currentDisplayed)
+        
+        // Double-check: verify the batch is correct
+        if (fixedBatchRef.current[0] !== winnerName) {
+          console.error('CRITICAL: Fixed winner not at position 0 in stored batch!')
+          fixedBatchRef.current = [winnerName, ...fixedBatchRef.current.filter(n => n !== winnerName).slice(0, 99)]
+        }
+        
+        // Verify fixed winner is at position 0
+        if (finalDisplayedNamesForRotation[0] !== winnerName) {
+          console.error('CRITICAL: Fixed winner not at position 0 after force!', {
+            position0: finalDisplayedNamesForRotation[0],
+            winnerName,
+            batch: finalDisplayedNamesForRotation.slice(0, 5)
+          })
+        } else {
+          console.log('✅ Fixed winner confirmed at position 0:', {
+            position0: finalDisplayedNamesForRotation[0],
+            winnerName,
+            batchLength: finalDisplayedNamesForRotation.length
+          })
+        }
+      } else {
+        // All names fit, use all names
+        finalDisplayedNamesForRotation = [...names]
+        fixedWinnerDisplayedIndex = targetWinnerIndex
+        // Store this batch in ref
+        fixedBatchRef.current = [...names]
+      }
+    }
+    
     // Calculate final rotation
     let endRotation
-    if (targetWinnerIndex !== null && targetWinnerIndex >= 0 && shouldUseFixedWinner) {
-      // Calculate rotation to land on the fixed winner
-      const sliceAngle = 360 / names.length
+    if (targetWinnerIndex !== null && targetWinnerIndex >= 0 && shouldUseFixedWinner && finalDisplayedNamesForRotation) {
+      // Use the prepared displayedNames with fixed winner at known position
+      const displayedNamesLength = finalDisplayedNamesForRotation.length
+      const fixedSliceAngle = 360 / displayedNamesLength
+      
+      // Fixed winner is always at position 0 in finalDisplayedNamesForRotation
+      // This ensures consistent rotation calculation
+      const fixedWinnerPos = fixedWinnerDisplayedIndex !== null ? fixedWinnerDisplayedIndex : 0
       
       console.log('Calculating fixed winner rotation:', {
         targetWinnerIndex,
-        sliceAngle,
+        fixedWinnerDisplayedIndex: fixedWinnerPos,
+        fixedWinnerName: finalDisplayedNamesForRotation[fixedWinnerPos],
+        sliceAngle: fixedSliceAngle,
         startRotation,
-        totalRotationDegrees
+        totalRotationDegrees,
+        displayedNamesLength,
+        finalDisplayedNamesSample: finalDisplayedNamesForRotation.slice(0, 5)
       })
       
       // Pointer is at 0° (right side, pointing right)
@@ -625,27 +757,34 @@ function App() {
       // We want the center of the target slice to align with the pointer (0°)
       
       // Calculate the center angle of the target slice in the original wheel (before rotation)
+      // Use fixedWinnerPos (position in displayedNames) - always 0 for consistency
       // Slices start at -90° (top), so slice i center is at: (i * sliceAngle - 90 + sliceAngle/2)
-      const sliceCenterAngle = (targetWinnerIndex * sliceAngle - 90 + sliceAngle / 2 + 360) % 360
+      // For position 0: center = (0 * sliceAngle - 90 + sliceAngle/2) = (-90 + sliceAngle/2)
+      const sliceCenterAngle = (fixedWinnerPos * fixedSliceAngle - 90 + fixedSliceAngle / 2 + 360) % 360
       
       // When wheel rotates clockwise by R degrees:
-      // - What was at angle A in original wheel is now at angle (A - R) mod 360
-      // - Pointer is at 0° (right side)
-      // - We want slice center to be at pointer: (sliceCenterAngle - endRotation) mod 360 = 0
-      // - So: endRotation mod 360 = sliceCenterAngle
+      // - The canvas coordinate system rotates counter-clockwise by R (making wheel appear to rotate clockwise)
+      // - A point that was at angle A in original wheel appears at angle (A - R) after rotation
+      // - The pointer is fixed at 0° in screen coordinates
+      // - What's at the pointer (0°) was originally at (360 - R) % 360 degrees
+      // - To make slice center appear at pointer: (360 - endRotation) % 360 = sliceCenterAngle
+      // - So: endRotation mod 360 = (360 - sliceCenterAngle) % 360
       
       // We want: endRotation = startRotation + totalRotationDegrees + adjustment
-      // where (endRotation mod 360) = sliceCenterAngle
+      // where (endRotation mod 360) = (360 - sliceCenterAngle) % 360
       
       // Calculate what the end rotation would be without adjustment
       const baseEndRotation = startRotation + totalRotationDegrees
       const baseEndRotationMod = ((baseEndRotation % 360) + 360) % 360
       
+      // Calculate the target rotation mod 360 (inverse of sliceCenterAngle to match winner calculation)
+      const targetRotationMod = (360 - sliceCenterAngle) % 360
+      
       // Calculate adjustment needed to align slice center with pointer
-      // We want: (baseEndRotation + adjustment) mod 360 = sliceCenterAngle
-      // So: adjustment = (sliceCenterAngle - baseEndRotationMod + 360) mod 360
+      // We want: (baseEndRotation + adjustment) mod 360 = targetRotationMod
+      // So: adjustment = (targetRotationMod - baseEndRotationMod + 360) % 360
       // But prefer the shorter path (adjustment between -180 and 180)
-      let adjustment = sliceCenterAngle - baseEndRotationMod
+      let adjustment = targetRotationMod - baseEndRotationMod
       
       // Normalize adjustment to shortest path
       if (adjustment > 180) {
@@ -656,12 +795,31 @@ function App() {
       
       endRotation = baseEndRotation + adjustment
       
-      // Verify: endRotation mod 360 should equal sliceCenterAngle
+      // CRITICAL: Verify the calculation - (360 - endRotation) % 360 should equal sliceCenterAngle
+      // This matches the winner calculation logic: pointerAngleInOriginal = (360 - R) % 360
+      const verifyEndMod = ((endRotation % 360) + 360) % 360
+      const verifyPointerAngle = (360 - verifyEndMod) % 360
+      const verifyDiff = Math.abs(verifyPointerAngle - sliceCenterAngle)
+      if (verifyDiff > 0.1 && verifyDiff < 359.9) {
+        console.error('CRITICAL: Rotation calculation error!', {
+          sliceCenterAngle,
+          verifyPointerAngle,
+          verifyDiff,
+          adjustment,
+          baseEndRotationMod,
+          targetRotationMod
+        })
+        // Force correct alignment
+        endRotation = startRotation + totalRotationDegrees + (targetRotationMod - baseEndRotationMod)
+      }
+      
+      // Verify: (360 - endRotation) % 360 should equal sliceCenterAngle
       const verifyMod = ((endRotation % 360) + 360) % 360
-      const diff = Math.abs(verifyMod - sliceCenterAngle)
+      const verifyPointerAngleFinal = (360 - verifyMod) % 360
+      const diff = Math.abs(verifyPointerAngleFinal - sliceCenterAngle)
       if (diff > 0.1 && diff < 359.9) {
         console.warn('Rotation calculation mismatch:', {
-          verifyMod,
+          verifyPointerAngleFinal,
           sliceCenterAngle,
           diff
         })
@@ -669,13 +827,20 @@ function App() {
       
       console.log('Fixed winner rotation calculation:', {
         sliceCenterAngle,
+        targetRotationMod,
         baseEndRotationMod,
         adjustment,
         endRotation,
-        endRotationMod: ((endRotation % 360) + 360) % 360
+        endRotationMod: verifyMod,
+        verifyPointerAngle: verifyPointerAngleFinal
       })
     } else {
-      // Random spin
+      // Random spin - store the current batch to ensure consistency
+      randomBatchRef.current = displayedNames.length > 0 ? [...displayedNames] : (names.length > 0 ? [...names] : [])
+      console.log('Stored random batch for winner calculation:', {
+        batchLength: randomBatchRef.current.length,
+        firstFew: randomBatchRef.current.slice(0, 5)
+      })
       const randomAngle = Math.random() * 360
       endRotation = startRotation + totalRotationDegrees + randomAngle
     }
@@ -778,8 +943,36 @@ function App() {
           winnerProcessedRef.current = true
 
           // Calculate winner using the EXACT final rotation value
+          // CRITICAL: Use the stored batch that was active when the spin started
+          // This ensures the winner matches what's actually displayed on the wheel
           const frozenRot = endRotation
-          const sliceAngle = 360 / names.length
+          let batchToUse = displayedNames
+          if (shouldUseFixedWinner && fixedBatchRef.current) {
+            // Use the exact batch that was used for fixed winner rotation calculation
+            batchToUse = fixedBatchRef.current
+            console.log('Using fixed batch for winner calculation:', {
+              batchLength: batchToUse.length,
+              position0: batchToUse[0],
+              isFixedWinner: shouldUseFixedWinner
+            })
+          } else if (!shouldUseFixedWinner && randomBatchRef.current && randomBatchRef.current.length > 0) {
+            // Use the stored batch from when random spin started
+            batchToUse = randomBatchRef.current
+            console.log('Using stored random batch for winner calculation:', {
+              batchLength: batchToUse.length,
+              firstFew: batchToUse.slice(0, 5),
+              isRandom: true
+            })
+          } else {
+            // Fallback to current displayedNames or all names
+            batchToUse = displayedNames.length > 0 ? displayedNames : names
+            console.log('Using fallback batch for winner calculation:', {
+              batchLength: batchToUse.length,
+              source: displayedNames.length > 0 ? 'displayedNames' : 'names'
+            })
+          }
+          const displayedNamesLength = batchToUse.length > 0 ? batchToUse.length : names.length
+          const sliceAngle = 360 / displayedNamesLength
 
           // The pointer is fixed at 0° (right side, pointing to the right)
           // After the wheel rotates clockwise by R degrees, find which slice is at the pointer
@@ -788,18 +981,22 @@ function App() {
           const R = ((frozenRot % 360) + 360) % 360
 
           // The pointer is at 0° (right side)
-          // After rotating clockwise by R degrees, what's at the pointer (0°) 
-          // was originally at (-R) degrees in the wheel's coordinate system
-          // Convert to 0-360 range: (360 - R) % 360
+          // When wheel rotates clockwise by R degrees:
+          // - The canvas coordinate system rotates counter-clockwise by R (making wheel appear to rotate clockwise)
+          // - A point that was at angle A in original wheel appears at angle (A - R) after rotation
+          // - The pointer is fixed at 0° in screen coordinates
+          // - What's at the pointer (0°) was originally at (-R) degrees in the wheel's coordinate system
+          // - Convert to 0-360 range: (360 - R) % 360
+          // This matches the pointer color calculation logic
           const pointerAngleInOriginal = (360 - R) % 360
 
-          // Find which slice contains this angle
+          // Find which slice contains this angle (based on displayedNames which is what's shown)
           // Slices start at -90° (top), so slice i covers:
           // from (i * sliceAngle - 90) to ((i+1) * sliceAngle - 90)
-          let selectedIndex = 0
+          let selectedDisplayedIndex = 0
           let found = false
 
-          for (let i = 0; i < names.length; i++) {
+          for (let i = 0; i < displayedNamesLength; i++) {
             // Calculate slice boundaries in original coordinates (0-360 range)
             const sliceStart = (i * sliceAngle - 90 + 360) % 360
             const sliceEnd = ((i + 1) * sliceAngle - 90 + 360) % 360
@@ -816,7 +1013,7 @@ function App() {
             }
 
             if (inSlice) {
-              selectedIndex = i
+              selectedDisplayedIndex = i
               found = true
               break
             }
@@ -825,25 +1022,56 @@ function App() {
           // Fallback: if no slice found (shouldn't happen), find closest slice center
           if (!found) {
             let minDist = Infinity
-            for (let i = 0; i < names.length; i++) {
+            for (let i = 0; i < displayedNamesLength; i++) {
               const sliceCenter = (i * sliceAngle - 90 + sliceAngle / 2 + 360) % 360
               let dist = Math.abs(pointerAngleInOriginal - sliceCenter)
               if (dist > 180) dist = 360 - dist
               if (dist < minDist) {
                 minDist = dist
-                selectedIndex = i
+                selectedDisplayedIndex = i
               }
             }
           }
 
           // Ensure valid index
-          selectedIndex = selectedIndex % names.length
-          if (selectedIndex < 0) {
-            selectedIndex = (selectedIndex + names.length) % names.length
+          selectedDisplayedIndex = selectedDisplayedIndex % displayedNamesLength
+          if (selectedDisplayedIndex < 0) {
+            selectedDisplayedIndex = (selectedDisplayedIndex + displayedNamesLength) % displayedNamesLength
+          }
+
+          // Get the winner name from the batch used for calculation (what's actually shown)
+          const displayedWinnerName = batchToUse.length > 0 ? batchToUse[selectedDisplayedIndex] : names[selectedDisplayedIndex]
+          
+          console.log('Winner calculation:', {
+            frozenRot: R,
+            pointerAngleInOriginal: pointerAngleInOriginal,
+            selectedDisplayedIndex,
+            displayedNamesLength,
+            sliceAngle,
+            displayedWinnerName,
+            batchToUseLength: batchToUse.length,
+            batchToUseFirstFew: batchToUse.slice(0, 5),
+            currentDisplayedNamesFirstFew: displayedNames.slice(0, 5)
+          })
+          
+          // Find the index of this winner in the full names array
+          let finalWinnerIndex = names.indexOf(displayedWinnerName)
+          if (finalWinnerIndex === -1) {
+            // Fallback: if not found, use the calculated index
+            finalWinnerIndex = selectedDisplayedIndex % names.length
+            console.warn('Winner name not found in names array, using fallback index:', {
+              displayedWinnerName,
+              finalWinnerIndex,
+              selectedDisplayedIndex
+            })
           }
 
           // Use fixed winner if available, otherwise use calculated winner
-          let winnerName, winnerColor, winnerTicket, finalWinnerIndex
+          let winnerName, winnerColor, winnerTicket
+          
+          // CRITICAL: Color must be based on selectedDisplayedIndex (position in displayed batch)
+          // This ensures popup color matches the slice color on the wheel
+          winnerColor = colors[selectedDisplayedIndex % colors.length]
           
           if (shouldUseFixedWinner && targetWinnerIndex !== null && targetWinnerIndex >= 0 && targetWinnerIndex < names.length) {
             // ALWAYS use the fixed winner index - don't recalculate from rotation
@@ -862,21 +1090,23 @@ function App() {
             }
             
             // If still no ticket, leave it undefined (don't use name as fallback)
-            winnerColor = colors[finalWinnerIndex % colors.length]
             } else {
-            // Random spin or fixed winner not found - use calculated winner
-            finalWinnerIndex = selectedIndex
-            winnerName = names[finalWinnerIndex]
+            // Random spin or fixed winner not found - use calculated winner from displayedNames
+            winnerName = displayedWinnerName
+            finalWinnerIndex = names.indexOf(winnerName)
+            if (finalWinnerIndex === -1) {
+              finalWinnerIndex = selectedDisplayedIndex % names.length
+              winnerName = names[finalWinnerIndex]
+            }
             // Get ticket from mapping - ONLY use actual ticket number, never fallback to name
             winnerTicket = nameToTicketMap[winnerName]
             // Don't use name as fallback - if no ticket, leave undefined
-            winnerColor = colors[finalWinnerIndex % colors.length]
             
             if (shouldUseFixedWinner) {
               console.warn('Fixed winner mode but targetWinnerIndex not found:', {
                 targetWinnerIndex,
                 shouldUseFixedWinner,
-                selectedIndex
+                selectedDisplayedIndex
               })
             }
           }
@@ -934,7 +1164,7 @@ function App() {
 
     // Start animation immediately
     animationFrameRef.current = requestAnimationFrame(animate)
-  }, [isSpinning, names, finalRotation, settings.spinTime, selectedSpinFile, spinMode, spinModes, spinCount])
+  }, [isSpinning, names, displayedNames, finalRotation, settings.spinTime, selectedSpinFile, spinMode, spinModes, spinCount])
 
   const handleWheelClick = () => {
     if (!showWinner) {
@@ -947,6 +1177,58 @@ function App() {
     // Unfreeze wheel - slow rotation can resume
     isFrozenRef.current = false
     setWinner(null)
+    // Clear fixed winner name so batches can rotate normally until next spin
+    setFixedWinnerName(null)
+    
+    // Automatically move to next file after spin completes
+    moveToNextFile()
+  }
+  
+  // Function to move to the next file in rotation
+  const moveToNextFile = () => {
+    try {
+      // Get all active files
+      const files = getActiveFiles()
+      
+      if (files.length === 0) {
+        console.log('No files available for rotation')
+        return
+      }
+      
+      // If only one file, stay on it
+      if (files.length === 1) {
+        console.log('Only one file available, staying on current file')
+        return
+      }
+      
+      // Calculate next file index (cycle through)
+      setCurrentFileIndex(prevIndex => {
+        const nextIndex = (prevIndex + 1) % files.length
+        
+        // Get next file
+        const nextFile = files[nextIndex]
+        
+        if (nextFile) {
+          console.log('🔄 Rotating to next file:', {
+            currentIndex: prevIndex,
+            nextIndex: nextIndex,
+            filename: nextFile.filename || nextFile.name,
+            totalFiles: files.length,
+            hasPicture: !!nextFile.picture,
+            pictureLength: nextFile.picture ? nextFile.picture.length : 0
+          })
+          
+          // Use setTimeout to ensure state is updated before loading next file
+          setTimeout(() => {
+            handleSelectSpinFile(nextFile)
+          }, 100)
+        }
+        
+        return nextIndex
+      })
+    } catch (error) {
+      console.error('Error moving to next file:', error)
+    }
   }
 
   const handleRemoveWinner = () => {
@@ -1195,6 +1477,19 @@ function App() {
         setLoadingSpinFiles(true)
         const files = getActiveFiles() // Get active files from localStorage
         setSpinFiles(files)
+        
+        // If files are available and no file is currently selected, select the first one
+        if (files.length > 0 && !selectedSpinFile) {
+          const firstFile = files[0]
+          setCurrentFileIndex(0)
+          handleSelectSpinFile(firstFile)
+        } else if (files.length > 0 && selectedSpinFile) {
+          // If a file is already selected, find its index
+          const currentIndex = files.findIndex(f => f.id === selectedSpinFile.id)
+          if (currentIndex !== -1) {
+            setCurrentFileIndex(currentIndex)
+          }
+        }
       } catch (error) {
         console.error('Failed to load spin files:', error)
       } finally {
@@ -1298,10 +1593,36 @@ function App() {
       filename: spinFile?.filename || spinFile?.name,
       hasJsonContent: !!spinFile?.json_content,
       jsonContentType: Array.isArray(spinFile?.json_content) ? 'array' : typeof spinFile?.json_content,
-      jsonContentLength: spinFile?.json_content?.length || 0
+      jsonContentLength: spinFile?.json_content?.length || 0,
+      hasPicture: !!spinFile?.picture
     })
     
+    // Clear fixed batch ref when selecting a new file so wheel can update with new entries
+    fixedBatchRef.current = null
+    randomBatchRef.current = null
+    
     setSelectedSpinFile(spinFile)
+    
+    // Set center image from the file's picture property (always update to match current file)
+    // Force update the center image to match the current file
+    if (spinFile.picture && String(spinFile.picture).trim() !== '') {
+      const pictureData = String(spinFile.picture).trim()
+      console.log('Setting center image from file:', {
+        filename: spinFile.filename || spinFile.name,
+        pictureLength: pictureData.length,
+        picturePreview: pictureData.substring(0, 50) + '...'
+      })
+      setCenterImage(pictureData)
+      localStorage.setItem('centerImage', pictureData)
+    } else {
+      // If file doesn't have a picture, clear the center image to match the file
+      console.log('File has no center image, clearing center image:', {
+        filename: spinFile.filename || spinFile.name,
+        hasPicture: !!spinFile.picture
+      })
+      setCenterImage(null)
+      localStorage.removeItem('centerImage')
+    }
     // Extract names from json_content and store mapping for winner matching
     if (spinFile.json_content && Array.isArray(spinFile.json_content)) {
       console.log('✅ Processing json_content array with', spinFile.json_content.length, 'entries')
@@ -1598,6 +1919,184 @@ function App() {
           console.log('✅ Updated namesText (sync)')
         }
         console.log('✅ State updated - names should now appear on wheel')
+        
+        // Check if file has a ticket number for fixed wheel functionality
+        if (spinFile.ticketNumber && String(spinFile.ticketNumber).trim() !== '') {
+          const targetTicket = String(spinFile.ticketNumber).trim()
+          console.log('🎯 File has ticket number for fixed wheel:', targetTicket)
+          
+          // Find the entry that matches this ticket number
+          let matchingEntryIndex = null
+          let matchingEntryName = null
+          let matchingEntryId = null
+          
+          // First, try to find by ticket in the finalTicketMap (fastest method)
+          const matchingNameFromTicket = finalTicketNameMap[targetTicket]
+          if (matchingNameFromTicket && finalIndexMap[matchingNameFromTicket] !== undefined) {
+            matchingEntryIndex = finalIndexMap[matchingNameFromTicket]
+            matchingEntryName = matchingNameFromTicket
+            // Find the original index in contentToProcess to create entryId
+            for (let i = 0; i < contentToProcess.length; i++) {
+              const item = contentToProcess[i]
+              if (typeof item === 'object' && item !== null) {
+                const ticketNumber = item['Ticket Number'] || 
+                                   item['ticket number'] || 
+                                   item['ticketNumber'] || 
+                                   item['Ticket'] || 
+                                   item['ticket'] ||
+                                   item['Ticket No'] ||
+                                   item['ticket no'] ||
+                                   item['TicketNo'] ||
+                                   ''
+                if (String(ticketNumber).trim() === targetTicket) {
+                  matchingEntryId = `${spinFile.id}-${i}`
+                  break
+                }
+              }
+            }
+            console.log('✅ Found matching entry for ticket (via ticket map):', {
+              ticket: targetTicket,
+              name: matchingEntryName,
+              index: matchingEntryIndex,
+              entryId: matchingEntryId
+            })
+          } else {
+            // Fallback: Search through json_content to find matching ticket
+            for (let i = 0; i < contentToProcess.length; i++) {
+              const item = contentToProcess[i]
+              if (typeof item === 'object' && item !== null) {
+                const ticketNumber = item['Ticket Number'] || 
+                                   item['ticket number'] || 
+                                   item['ticketNumber'] || 
+                                   item['Ticket'] || 
+                                   item['ticket'] ||
+                                   item['Ticket No'] ||
+                                   item['ticket no'] ||
+                                   item['TicketNo'] ||
+                                   ''
+                
+                if (String(ticketNumber).trim() === targetTicket) {
+                  // Found matching ticket - get the entry details
+                  const firstName = item['First Name'] || item['first name'] || item['firstName'] || ''
+                  const lastName = item['Last Name'] || item['last name'] || item['lastName'] || ''
+                  let name = ''
+                  if (firstName && lastName) {
+                    name = `${firstName} ${lastName}`.trim()
+                  } else if (firstName) {
+                    name = String(firstName).trim()
+                  } else if (lastName) {
+                    name = String(lastName).trim()
+                  } else if (ticketNumber) {
+                    name = String(ticketNumber).trim()
+                  }
+                  
+                  // Format name with ticket if needed
+                  let formattedName = name
+                  if (ticketNumber && String(ticketNumber).trim() !== '') {
+                    if (name) {
+                      formattedName = `${name} (${String(ticketNumber).trim()})`
+                    } else {
+                      formattedName = String(ticketNumber).trim()
+                    }
+                  }
+                  
+                  // Find this entry in finalNames
+                  const entryId = `${spinFile.id}-${i}`
+                  const nameInFinal = finalNames.find(n => {
+                    // Check if name matches or if ticket is in the name
+                    return n === formattedName || 
+                           n === name ||
+                           n.includes(`(${targetTicket})`) ||
+                           (finalTicketMap[n] && String(finalTicketMap[n]).trim() === targetTicket)
+                  })
+                  
+                  if (nameInFinal) {
+                    matchingEntryIndex = finalIndexMap[nameInFinal]
+                    matchingEntryName = nameInFinal
+                    matchingEntryId = entryId
+                    console.log('✅ Found matching entry for ticket (via search):', {
+                      ticket: targetTicket,
+                      name: matchingEntryName,
+                      index: matchingEntryIndex,
+                      entryId: matchingEntryId
+                    })
+                    break
+                  }
+                }
+              }
+            }
+          }
+          
+          // If found, set as fixed winner for spin 1
+          if (matchingEntryIndex !== null && matchingEntryName) {
+            // Get current spin modes and selected winners
+            const savedSpinModes = localStorage.getItem('spinModes')
+            const savedSelectedWinners = localStorage.getItem('selectedWinners')
+            
+            let spinModes = {}
+            let selectedWinners = []
+            
+            try {
+              if (savedSpinModes) {
+                spinModes = JSON.parse(savedSpinModes)
+              }
+              if (savedSelectedWinners) {
+                selectedWinners = JSON.parse(savedSelectedWinners)
+              }
+            } catch (e) {
+              console.error('Failed to parse spin modes or selected winners:', e)
+            }
+            
+            // Set spin mode for spin 1 to "fixed"
+            spinModes['1'] = 'fixed'
+            localStorage.setItem('spinModes', JSON.stringify(spinModes))
+            
+            // Set selected winner for spin 1
+            const winnerForSpin1 = {
+              spin: 1,
+              winnerId: matchingEntryId,
+              name: matchingEntryName,
+              ticketNumber: targetTicket
+            }
+            
+            // Remove any existing winner for spin 1
+            selectedWinners = selectedWinners.filter(w => w.spin !== 1 && Number(w.spin) !== 1 && String(w.spin) !== '1')
+            
+            // Add new winner for spin 1
+            selectedWinners.push(winnerForSpin1)
+            localStorage.setItem('selectedWinners', JSON.stringify(selectedWinners))
+            
+            // Update state
+            setSpinModes(spinModes)
+            
+            console.log('✅ Fixed winner set for spin 1:', {
+              ticket: targetTicket,
+              name: matchingEntryName,
+              entryId: matchingEntryId,
+              index: matchingEntryIndex
+            })
+          } else {
+            console.warn('⚠️ Ticket number not found in file entries:', targetTicket)
+          }
+        } else {
+          // No ticket number - ensure spin 1 is random
+          const savedSpinModes = localStorage.getItem('spinModes')
+          let spinModes = {}
+          try {
+            if (savedSpinModes) {
+              spinModes = JSON.parse(savedSpinModes)
+            }
+          } catch (e) {
+            console.error('Failed to parse spin modes:', e)
+          }
+          
+          // Set spin mode for spin 1 to "random" if not already set to "fixed" by user
+          if (spinModes['1'] !== 'fixed') {
+            spinModes['1'] = 'random'
+            localStorage.setItem('spinModes', JSON.stringify(spinModes))
+            setSpinModes(spinModes)
+          }
+        }
       } else {
         console.error('❌ finalNames is empty! Nothing to display on wheel.')
         alert('Warning: No entries to display. All entries may have been filtered out.')
@@ -1705,6 +2204,98 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [spinWheel])
 
+  // Effect to randomly select 100 entries from names array and update every few milliseconds
+  // BUT ONLY when wheel is NOT spinning and NO winner is displayed
+  useEffect(() => {
+    if (names.length === 0) {
+      setDisplayedNames([])
+      return
+    }
+
+    // If names.length <= 100, just use all names
+    if (names.length <= 100) {
+      setDisplayedNames(names)
+      return
+    }
+
+    // Function to randomly select 100 entries
+    const selectRandomBatch = () => {
+      // Don't update if spinning or showing winner - keep current batch frozen
+      if (isSpinning || showWinner || winner) {
+        return
+      }
+      
+      // CRITICAL: If we have a fixed batch stored, don't change it
+      if (fixedBatchRef.current) {
+        return
+      }
+      
+      // CRITICAL: If we're in fixed winner mode for spin 1, don't change the batch
+      // The batch should already be set correctly in spinWheel function
+      const savedSpinModes = localStorage.getItem('spinModes')
+      if (savedSpinModes) {
+        try {
+          const spinModes = JSON.parse(savedSpinModes)
+          if (spinModes['1'] === 'fixed' && fixedWinnerName) {
+            // Fixed winner mode - don't change the batch, it's already set correctly
+            // Just ensure the fixed winner is at position 0 if batch exists
+            if (displayedNames.length > 0 && displayedNames[0] !== fixedWinnerName) {
+              const batch = [fixedWinnerName, ...displayedNames.filter(n => n !== fixedWinnerName).slice(0, 99)]
+              setDisplayedNames(batch)
+            }
+            return
+          }
+        } catch (e) {
+          // Continue with normal batch selection
+        }
+      }
+      
+      // If there's a fixed winner, ensure it's ALWAYS at position 0 in the batch
+      let batch = []
+      if (fixedWinnerName && names.includes(fixedWinnerName)) {
+        // CRITICAL: Fixed winner MUST be at position 0 for rotation calculation to work
+        // Start with the fixed winner at position 0
+        batch.push(fixedWinnerName)
+        // Get remaining names (excluding the fixed winner)
+        const remainingNames = names.filter(name => name !== fixedWinnerName)
+        // Shuffle and take 99 more to make 100 total
+        const shuffled = [...remainingNames].sort(() => Math.random() - 0.5)
+        batch = [fixedWinnerName, ...shuffled.slice(0, 99)]
+        // Ensure fixed winner is exactly at position 0
+        if (batch[0] !== fixedWinnerName) {
+          batch = batch.filter(n => n !== fixedWinnerName)
+          batch.unshift(fixedWinnerName)
+          batch = batch.slice(0, 100)
+        }
+      } else {
+        // No fixed winner - random selection
+        const shuffled = [...names].sort(() => Math.random() - 0.5)
+        batch = shuffled.slice(0, 100)
+      }
+      
+      setDisplayedNames(batch)
+    }
+
+    // Set initial batch immediately when names change (only if not currently spinning/showing winner)
+    // If spinning/showing winner, keep current displayedNames unchanged
+    // CRITICAL: Always update displayedNames immediately when names change, so wheel shows new entries right away
+    if (!isSpinning && !showWinner && !winner) {
+      selectRandomBatch()
+    }
+
+    // Only start rotation interval if wheel is idle and no winner is displayed
+    if (isSpinning || showWinner || winner) {
+      // Wheel is spinning or showing winner - don't rotate participants
+      return
+    }
+
+    // Update every 50 milliseconds to cycle through different batches
+    // Only when wheel is idle and no winner is displayed
+    const interval = setInterval(selectRandomBatch, 50)
+
+    return () => clearInterval(interval)
+  }, [names, isSpinning, showWinner, winner, fixedWinnerName])
+
   const colors = ['#efb71d', '#24a643', '#4d7ceb', '#d82135'] // yellow, green, blue, red
 
   // Helper to determine text color based on background
@@ -1721,20 +2312,70 @@ function App() {
     // If pointerChangesColor setting is disabled, use fixed gold color
     if (!settings.pointerChangesColor) return '#ffd700' // Fixed Gold
 
-    const sliceAngle = 360 / names.length
-    // Normalize rotation
+    // Use displayedNames.length because that's what's actually shown on the wheel
+    const displayedNamesLength = displayedNames.length > 0 ? displayedNames.length : names.length
+    const sliceAngle = 360 / displayedNamesLength
+    
+    // Normalize rotation to 0-360 range
     const R = ((finalRotation % 360) + 360) % 360
-    // Pointer is at 0 (Right). Angle at pointer in wheel context:
-    const pointerAngle = (360 - R) % 360
 
-    // Shift by 90 degrees because slice 0 starts at -90 (Top)
-    // So relative to slice 0, the pointer is at pointerAngle + 90
-    const adjustedAngle = (pointerAngle + 90) % 360
+    // The pointer is fixed at 0° (right side)
+    // After rotating clockwise by R degrees, what's at the pointer (0°) 
+    // was originally at (-R) degrees in the wheel's coordinate system
+    // Convert to 0-360 range: (360 - R) % 360
+    const pointerAngleInOriginal = (360 - R) % 360
 
-    // Find index
-    const index = Math.floor(adjustedAngle / sliceAngle)
-    const safeIndex = index % names.length
-    return colors[safeIndex % colors.length]
+    // Find which slice contains this angle (using same logic as winner calculation)
+    // Slices start at -90° (top), so slice i covers:
+    // from (i * sliceAngle - 90) to ((i+1) * sliceAngle - 90)
+    let selectedDisplayedIndex = 0
+    let found = false
+
+    for (let i = 0; i < displayedNamesLength; i++) {
+      // Calculate slice boundaries in original coordinates (0-360 range)
+      const sliceStart = (i * sliceAngle - 90 + 360) % 360
+      const sliceEnd = ((i + 1) * sliceAngle - 90 + 360) % 360
+
+      // Check if pointer angle is within this slice
+      let inSlice = false
+
+      if (sliceStart < sliceEnd) {
+        // Normal case: slice doesn't wrap around 0°
+        inSlice = pointerAngleInOriginal >= sliceStart && pointerAngleInOriginal < sliceEnd
+      } else {
+        // Wrap-around case: slice crosses 0° boundary (e.g., 315° to 45°)
+        inSlice = pointerAngleInOriginal >= sliceStart || pointerAngleInOriginal < sliceEnd
+      }
+
+      if (inSlice) {
+        selectedDisplayedIndex = i
+        found = true
+        break
+      }
+    }
+
+    // Fallback: if no slice found, find closest slice center
+    if (!found) {
+      let minDist = Infinity
+      for (let i = 0; i < displayedNamesLength; i++) {
+        const sliceCenter = (i * sliceAngle - 90 + sliceAngle / 2 + 360) % 360
+        let dist = Math.abs(pointerAngleInOriginal - sliceCenter)
+        if (dist > 180) dist = 360 - dist
+        if (dist < minDist) {
+          minDist = dist
+          selectedDisplayedIndex = i
+        }
+      }
+    }
+
+    // Ensure valid index
+    selectedDisplayedIndex = selectedDisplayedIndex % displayedNamesLength
+    if (selectedDisplayedIndex < 0) {
+      selectedDisplayedIndex = (selectedDisplayedIndex + displayedNamesLength) % displayedNamesLength
+    }
+    
+    // Return color based on displayed index - this matches what's actually shown
+    return colors[selectedDisplayedIndex % colors.length]
   }
 
   // Use fixed gold color for better visibility (or dynamic if setting enabled)
@@ -1753,7 +2394,7 @@ function App() {
             <div className="wheel-wrapper" onClick={handleWheelClick} style={{ cursor: (isSpinning || showWinner) ? 'not-allowed' : 'pointer' }}>
               <div style={{ width: '100%', height: '100%' }}>
                 <CanvasWheel
-                  names={names}
+                  names={fixedBatchRef.current && isSpinning ? fixedBatchRef.current : displayedNames}
                   colors={colors}
                   rotation={finalRotation}
                   width={750}
@@ -2024,7 +2665,7 @@ function App() {
           <div className="wheel-wrapper" onClick={handleWheelClick} style={{ cursor: (isSpinning || showWinner) ? 'not-allowed' : 'pointer' }}>
             <div style={{ width: '100%', height: '100%' }}>
               <CanvasWheel
-                names={names}
+                names={displayedNames}
                 colors={colors}
                 rotation={finalRotation}
                 width={750}

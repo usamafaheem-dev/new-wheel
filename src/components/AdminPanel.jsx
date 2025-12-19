@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { FiUpload, FiX, FiFile, FiImage, FiCheck, FiAlertCircle, FiSearch, FiSend, FiLogOut, FiShuffle, FiRefreshCw } from 'react-icons/fi'
 import { parseExcelFile, imageToBase64 } from '../utils/excelParser'
 import { getStoredFiles, saveFile, deleteFile, getFileById, getActiveFiles, toggleFileActive, checkPassword as checkPasswordLocal, setPassword as setPasswordLocal } from '../utils/storage'
+// Removed API imports - using localStorage only
 
 const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
   const [password, setPassword] = useState('')
@@ -15,6 +16,10 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
   const [passwordError, setPasswordError] = useState('')
   const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false)
   const [pendingUpload, setPendingUpload] = useState(null)
+  
+  // Multiple file upload rows state (similar to Wheel Admin)
+  const [uploadRows, setUploadRows] = useState([])
+  const [loadingFiles, setLoadingFiles] = useState(false)
   
   // New states for comprehensive admin panel
   const [entries, setEntries] = useState([])
@@ -66,6 +71,7 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
   useEffect(() => {
     if (isAuthenticated) {
       loadEntries()
+      loadUploadRows()
       // Load spin mode settings from localStorage
       const savedSpinModes = localStorage.getItem('spinModes')
       if (savedSpinModes) {
@@ -105,6 +111,262 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
       }
     }
   }, [isAuthenticated])
+  
+  // Load upload rows from localStorage
+  const loadUploadRows = async () => {
+    setLoadingFiles(true)
+    try {
+      // Use localStorage only
+      const localFiles = getStoredFiles()
+      setUploadRows(
+        localFiles.map((file) => ({
+          id: file.id,
+          image: null,
+          imagePreview: file.picture || null, // This is the center image that appears in wheel
+          dataFile: null,
+          fileName: file.filename,
+          active: file.active !== false, // Default to true if not set
+          ticketNumber: file.ticketNumber || '', // Load ticket number from saved file
+          picture: file.picture || null, // Store picture for when file is selected
+        }))
+      )
+    } catch (err) {
+      console.error('Error loading files from localStorage:', err)
+      setUploadRows([])
+    } finally {
+      setLoadingFiles(false)
+    }
+  }
+  
+  // Add new upload row
+  const handleAddRow = () => {
+    const newRow = {
+      id: Date.now() + Math.random(),
+      image: null,
+      dataFile: null,
+      fileName: '',
+      active: true,
+      imagePreview: null,
+      ticketNumber: '',
+    }
+    setUploadRows((prev) => [...prev, newRow])
+  }
+  
+  // Handle image change for a row
+  const handleImageChange = (id, file) => {
+    setUploadRows((prev) =>
+      prev.map((row) =>
+        row.id === id
+          ? { ...row, image: file, imagePreview: URL.createObjectURL(file) }
+          : row
+      )
+    )
+  }
+  
+  // Handle data file change for a row
+  const handleDataFileChange = (id, file) => {
+    setUploadRows((prev) =>
+      prev.map((row) =>
+        row.id === id
+          ? { ...row, dataFile: file, fileName: file.name.replace(/\.(xlsx|xls)$/i, '') || row.fileName }
+          : row
+      )
+    )
+  }
+  
+  // Handle ticket number change for a row
+  const handleTicketNumberChange = (id, value) => {
+    setUploadRows((prev) =>
+      prev.map((row) =>
+        row.id === id ? { ...row, ticketNumber: value } : row
+      )
+    )
+    
+    // If this is an existing file (has id), update the file in localStorage
+    if (id) {
+      try {
+        const files = getStoredFiles()
+        const file = files.find(f => f.id === id)
+        if (file) {
+          file.ticketNumber = value ? value.trim() : ''
+          saveFile(file)
+          console.log('Updated ticket number for file:', { fileId: id, ticketNumber: file.ticketNumber })
+        }
+      } catch (error) {
+        console.error('Failed to update ticket number in file:', error)
+      }
+    }
+  }
+  
+  // Handle file name change for a row
+  const handleFileNameChange = (id, value) => {
+    setUploadRows((prev) =>
+      prev.map((row) =>
+        row.id === id ? { ...row, fileName: value } : row
+      )
+    )
+  }
+  
+  // Toggle active status
+  const handleToggleActive = async (id) => {
+    try {
+      // Use localStorage only
+      const files = getStoredFiles()
+      const file = files.find(f => f.id === id)
+      if (file) {
+        const newActiveStatus = !(file.active !== false) // Toggle active status
+        toggleFileActive(id, newActiveStatus)
+        setUploadRows((prev) =>
+          prev.map((row) =>
+            row.id === id ? { ...row, active: newActiveStatus } : row
+          )
+        )
+      }
+    } catch (error) {
+      console.error('Error toggling active:', error)
+      setError('Failed to toggle active status')
+    }
+  }
+  
+  // Delete row
+  const handleDeleteRow = async (id) => {
+    try {
+      // Use localStorage only
+      deleteFile(id)
+      setUploadRows((prev) => prev.filter((row) => row.id !== id))
+      // Reload entries to reflect deletion
+      await loadEntries()
+    } catch (error) {
+      console.error('Error deleting file:', error)
+      setError('Failed to delete file')
+    }
+  }
+  
+  // Upload all new files
+  const handleUploadAll = async () => {
+    setIsUploading(true)
+    setError('')
+    setSuccess('')
+    
+    try {
+      const uploadedFiles = []
+      const updatedRows = [...uploadRows]
+      
+      for (let i = 0; i < uploadRows.length; i++) {
+        const row = uploadRows[i]
+        // Skip rows that don't have a data file (already uploaded or empty)
+        if (!row.dataFile) continue
+        
+        // Parse Excel file and convert image to base64 (localStorage only - no API)
+        try {
+          const jsonContent = await parseExcelFile(row.dataFile)
+          let pictureBase64 = null
+          
+          // Convert image to base64 if provided
+          if (row.image) {
+            pictureBase64 = await imageToBase64(row.image)
+          }
+          
+          // Save to localStorage with picture as base64 (so it appears in center of wheel)
+          const fileData = {
+            id: row.id || `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            filename: row.fileName || 'Untitled',
+            json_content: jsonContent,
+            picture: pictureBase64, // Center image for wheel
+            active: row.active !== false, // Default to true
+            ticketNumber: row.ticketNumber ? row.ticketNumber.trim() : '', // Save ticket number for fixed wheel functionality
+            createdAt: new Date().toISOString()
+          }
+          
+          saveFile(fileData)
+          uploadedFiles.push(fileData)
+          
+          // Update the row with the new ID and mark as uploaded (remove dataFile)
+          const rowIndex = updatedRows.findIndex(r => r.id === row.id)
+          if (rowIndex !== -1) {
+            updatedRows[rowIndex] = {
+              ...updatedRows[rowIndex],
+              id: fileData.id,
+              dataFile: null, // Clear dataFile to mark as uploaded
+              image: null, // Clear image file (keep imagePreview)
+              imagePreview: pictureBase64 || row.imagePreview, // Keep preview
+              picture: pictureBase64 || row.picture // Store picture
+            }
+          }
+        } catch (uploadError) {
+          console.error(`Upload failed for ${row.fileName}:`, uploadError)
+          setError(`Upload failed for ${row.fileName}: ${uploadError.message || 'Unknown error'}`)
+          continue
+        }
+      }
+      
+      // Update rows state to reflect uploaded status (don't reload from backend yet)
+      setUploadRows(updatedRows)
+      
+      // Only reload entries and show success if at least one file was uploaded
+      if (uploadedFiles.length > 0) {
+        setSuccess('All files uploaded successfully!')
+        // Reload entries for the publish section
+        await loadEntries()
+      } else {
+        // If no files were uploaded, show error but don't clear existing entries
+        setError('No files were uploaded. Please check the error messages above.')
+        setIsUploading(false)
+        return
+      }
+      
+      // Notify parent component about uploaded files (so they appear on wheel)
+      if (onFileUploaded && uploadedFiles.length > 0) {
+        // Notify with the last uploaded file (or first if only one)
+        const fileToNotify = uploadedFiles[uploadedFiles.length - 1]
+        
+        // Ensure file is properly loaded from localStorage with all data
+        try {
+          const storedFiles = getStoredFiles()
+          const completeFile = storedFiles.find(f => f.id === fileToNotify.id)
+          
+          if (completeFile && completeFile.json_content && Array.isArray(completeFile.json_content)) {
+            console.log('Publishing file to wheel:', {
+              fileId: completeFile.id,
+              filename: completeFile.filename,
+              entriesCount: completeFile.json_content.length,
+              hasPicture: !!completeFile.picture
+            })
+            onFileUploaded(completeFile)
+          } else {
+            // Use fileToNotify if it has json_content
+            if (fileToNotify.json_content && Array.isArray(fileToNotify.json_content)) {
+              console.log('Publishing file to wheel (from upload):', {
+                fileId: fileToNotify.id,
+                filename: fileToNotify.filename,
+                entriesCount: fileToNotify.json_content.length
+              })
+              onFileUploaded(fileToNotify)
+            } else {
+              console.error('File missing json_content:', fileToNotify)
+              setError('File uploaded but data not available. Please select the file manually from the dropdown.')
+            }
+          }
+        } catch (err) {
+          console.error('Error loading file for wheel:', err)
+          // Try with fileToNotify anyway
+          if (fileToNotify.json_content && Array.isArray(fileToNotify.json_content)) {
+            onFileUploaded(fileToNotify)
+          }
+        }
+      }
+      
+      // Reload rows from localStorage after a short delay to get updated data
+      setTimeout(async () => {
+        await loadUploadRows()
+      }, 500)
+    } catch (error) {
+      console.error('Error uploading files:', error)
+      setError('Something went wrong while uploading. Try again.')
+    } finally {
+      setIsUploading(false)
+    }
+  }
   
   // Listen for spin count updates
   useEffect(() => {
@@ -300,6 +562,7 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
       const files = getStoredFiles()
       
       if (!files || files.length === 0) {
+        // Don't clear existing entries if no files found - just show error
         setError('No files found. Please upload an Excel file.')
         setIsLoadingEntries(false)
         return
@@ -398,11 +661,19 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
           entries: f.json_content?.length || 0 
         }))
       })
-      setEntries(allEntries)
-      setPublishedEntries([])
+      // Only update entries if we found valid entries (preserve existing entries on error)
+      if (allEntries.length > 0 || files.some(f => f.json_content && Array.isArray(f.json_content))) {
+        setEntries(allEntries)
+        setPublishedEntries([])
+      } else {
+        // If no valid entries found but files exist, show warning but don't clear existing entries
+        console.warn('No valid entries found in files, preserving existing entries')
+        setError('Files found but no valid entries. Please check your file format.')
+      }
     } catch (error) {
       console.error('Failed to load entries:', error)
-      setError('Failed to load entries')
+      setError('Failed to load entries: ' + (error.message || 'Unknown error'))
+      // Don't clear entries on error - preserve existing state
     } finally {
       setIsLoadingEntries(false)
     }
@@ -413,8 +684,9 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
     setPasswordError('')
     
     try {
-      // Client-side password check (default: "admin")
+      // Use localStorage only - no API calls
       const isValid = checkPasswordLocal(password)
+      
       if (isValid) {
         setIsAuthenticated(true)
         setError('')
@@ -571,6 +843,7 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
       // Trigger a reload of settings in parent
       window.dispatchEvent(new Event('spinModeUpdated'))
       
+      // Try to load and publish file to wheel (non-blocking - entries are already published)
       if (onFileUploaded) {
         // Get the file ID from entries (assuming all entries are from same file or get first file)
         const fileIds = [...new Set(entries.map(e => e.fileId).filter(Boolean))]
@@ -589,25 +862,28 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
                 entriesCount: fileToLoad.json_content?.length || 0
               })
               onFileUploaded(fileToLoad)
+              // Update success message to indicate file was loaded
               setSuccess(`${entries.length} entries published to wheel! File loaded.`)
             } else {
               console.error('No matching files found for fileIds:', fileIds)
-              setError('Failed to find file to load. Please try selecting the file manually.')
+              // Don't override success message - entries are still published
+              console.warn('File not found in localStorage, but entries are published. User can select file manually.')
             }
           } catch (err) {
             console.error('Failed to load file for wheel:', err)
-            setError('Failed to load file: ' + (err.message || 'Unknown error'))
+            // Don't override success message - entries are still published
+            console.warn('Error loading file, but entries are published. User can select file manually.')
           }
         } else {
-          console.error('No file IDs found in entries')
-          setError('No file IDs found. Please upload a file first.')
+          console.warn('No file IDs found in entries - entries are still published')
         }
       } else {
-        console.warn('onFileUploaded callback not provided')
-        setError('Cannot publish: onFileUploaded callback missing')
+        console.warn('onFileUploaded callback not provided - entries are still published')
       }
     } catch (err) {
-      setError('Failed to publish entries')
+      console.error('Failed to publish entries:', err)
+      setError('Failed to publish entries: ' + (err.message || 'Unknown error'))
+      // Don't clear entries on error
     } finally {
       setIsPublishing(false)
     }
@@ -817,44 +1093,253 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
         </div>
 
         <div className="admin-content-scroll">
-          {/* Upload Excel Files Section */}
+          {/* Upload Files Section - Multiple Files */}
           <div className="admin-section">
-            <h3 className="admin-section-title" style={{ color: '#d82135' }}>Upload Excel Files</h3>
-            <div className="admin-upload-controls">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h3 className="admin-section-title" style={{ color: '#d82135' }}>Upload Files</h3>
               <button 
                 className="admin-choose-btn"
-                onClick={() => excelInputRef.current?.click()}
+                onClick={handleAddRow}
+                style={{ 
+                  padding: '10px 20px', 
+                  fontSize: '14px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}
               >
-                Choose Files
+                <span style={{ fontSize: '18px', fontWeight: 'bold' }}>+</span> Add Row
               </button>
-              <span className="admin-file-name">
-                {excelFile ? excelFile.name : 'No file chosen'}
-              </span>
             </div>
-            <input
-              ref={excelInputRef}
-              type="file"
-              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-              onChange={handleExcelChange}
-              style={{ display: 'none' }}
-            />
-            <div className="admin-field">
-              <label>File Name</label>
-              <input
-                type="text"
-                value={filename}
-                onChange={(e) => setFilename(e.target.value)}
-                placeholder="Enter filename"
-                required
-              />
-            </div>
-            <button 
-              className="admin-upload-btn"
-              onClick={handleUpload}
-              disabled={isUploading || !excelFile}
-            >
-              {isUploading ? 'Uploading...' : 'Upload Files'}
-            </button>
+            
+            {loadingFiles ? (
+              <div style={{ textAlign: 'center', padding: '40px', color: '#666' }}>Loading files...</div>
+            ) : uploadRows.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '40px', color: '#666', backgroundColor: '#f9f9f9', borderRadius: '8px', border: '2px dashed #ddd' }}>
+                No files. Click "Add Row" to upload files.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginBottom: '20px' }}>
+                {uploadRows.map((row, index) => (
+                  <div 
+                    key={row.id}
+                    style={{
+                      backgroundColor: row.active !== false ? '#fff' : '#f9f9f9',
+                      border: '1px solid #ddd',
+                      borderRadius: '8px',
+                      padding: '20px',
+                      position: 'relative'
+                    }}
+                  >
+                    {/* Delete button */}
+                    {row.id && (
+                      <button
+                        onClick={() => handleDeleteRow(row.id)}
+                        style={{
+                          position: 'absolute',
+                          top: '15px',
+                          right: '15px',
+                          padding: '6px 12px',
+                          backgroundColor: '#d82135',
+                          color: 'white',
+                          border: 'none',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}
+                      >
+                        <FiX size={14} /> Delete
+                      </button>
+                    )}
+                    
+                    <div style={{ marginBottom: '16px', fontWeight: 'bold', color: '#333', fontSize: '16px' }}>
+                      File {index + 1}
+                    </div>
+                    
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
+                      {/* File Name */}
+                      <div className="admin-field">
+                        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500', color: '#333' }}>File Name</label>
+                        <input
+                          type="text"
+                          value={row.fileName}
+                          disabled={!row.active && row.id}
+                          onChange={(e) => handleFileNameChange(row.id, e.target.value)}
+                          placeholder="Enter file name"
+                          style={{
+                            width: '100%',
+                            padding: '10px',
+                            border: '1px solid #ddd',
+                            borderRadius: '4px',
+                            backgroundColor: (row.active !== false || !row.id) ? 'white' : '#f5f5f5',
+                            fontSize: '14px'
+                          }}
+                        />
+                      </div>
+                      
+                      {/* Data File Upload */}
+                      <div className="admin-field">
+                        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500', color: '#333' }}>Excel File</label>
+                        <div style={{ position: 'relative' }}>
+                          <input
+                            type="file"
+                            accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                            disabled={!row.active && row.id}
+                            onChange={(e) => handleDataFileChange(row.id, e.target.files[0])}
+                            style={{ display: 'none' }}
+                            id={`file-${row.id}`}
+                          />
+                          <label
+                            htmlFor={`file-${row.id}`}
+                            style={{
+                              display: 'inline-block',
+                              width: '100%',
+                              padding: '10px',
+                              backgroundColor: (row.active !== false || !row.id) ? '#4d7ceb' : '#ccc',
+                              color: 'white',
+                              borderRadius: '4px',
+                              cursor: (row.active !== false || !row.id) ? 'pointer' : 'not-allowed',
+                              fontSize: '14px',
+                              textAlign: 'center',
+                              border: 'none'
+                            }}
+                          >
+                            {row.dataFile ? row.dataFile.name : 'Choose Excel File'}
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', marginBottom: '20px' }}>
+                      {/* Center Image Upload */}
+                      <div className="admin-field">
+                        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500', color: '#333' }}>Center Image (for wheel)</label>
+                        {row.imagePreview ? (
+                          <div style={{ position: 'relative', display: 'inline-block' }}>
+                            <img
+                              src={row.imagePreview}
+                              alt="preview"
+                              style={{ 
+                                width: '120px', 
+                                height: '120px', 
+                                objectFit: 'cover', 
+                                borderRadius: '8px',
+                                border: '2px solid #ddd'
+                              }}
+                            />
+                            <button
+                              onClick={() => handleImageChange(row.id, null)}
+                              style={{
+                                position: 'absolute',
+                                top: '-8px',
+                                right: '-8px',
+                                backgroundColor: '#d82135',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: '50%',
+                                width: '24px',
+                                height: '24px',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '14px'
+                              }}
+                            >
+                              <FiX />
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ position: 'relative' }}>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              disabled={!row.active && row.id}
+                              onChange={(e) => handleImageChange(row.id, e.target.files[0])}
+                              style={{ display: 'none' }}
+                              id={`image-${row.id}`}
+                            />
+                            <label
+                              htmlFor={`image-${row.id}`}
+                              style={{
+                                display: 'inline-block',
+                                width: '100%',
+                                padding: '10px',
+                                backgroundColor: (row.active !== false || !row.id) ? '#24a643' : '#ccc',
+                                color: 'white',
+                                borderRadius: '4px',
+                                cursor: (row.active !== false || !row.id) ? 'pointer' : 'not-allowed',
+                                fontSize: '14px',
+                                textAlign: 'center',
+                                border: 'none'
+                              }}
+                            >
+                              <FiImage style={{ marginRight: '8px', verticalAlign: 'middle' }} />
+                              Choose Center Image
+                            </label>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Ticket Number */}
+                      <div className="admin-field">
+                        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500', color: '#333' }}>Ticket Number</label>
+                        <input
+                          type="text"
+                          value={row.ticketNumber}
+                          disabled={!row.active && row.id}
+                          onChange={(e) => handleTicketNumberChange(row.id, e.target.value)}
+                          placeholder="Enter ticket number(s), comma separated"
+                          style={{
+                            width: '100%',
+                            padding: '10px',
+                            border: '1px solid #ddd',
+                            borderRadius: '4px',
+                            backgroundColor: (row.active !== false || !row.id) ? 'white' : '#f5f5f5',
+                            fontSize: '14px',
+                            color: '#000'
+                          }}
+                        />
+                      </div>
+                    </div>
+                    
+                    {/* Status Toggle for existing files */}
+                    {row.id && (
+                      <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid #eee' }}>
+                        <button
+                          onClick={() => handleToggleActive(row.id)}
+                          style={{
+                            padding: '8px 16px',
+                            backgroundColor: row.active ? '#24a643' : '#ccc',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer',
+                            fontSize: '14px'
+                          }}
+                        >
+                          {row.active ? '✓ Active' : 'Inactive'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            
+            {uploadRows.length > 0 && (
+              <button 
+                className="admin-upload-btn"
+                onClick={handleUploadAll}
+                disabled={isUploading || uploadRows.filter(r => r.dataFile).length === 0}
+                style={{ width: '100%', marginTop: '20px', padding: '12px', fontSize: '16px', fontWeight: 'bold' }}
+              >
+                {isUploading ? 'Uploading...' : 'UPLOAD ALL FILES'}
+              </button>
+            )}
           </div>
 
           {/* Go to Spin Wheel Button */}

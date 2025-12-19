@@ -3,9 +3,21 @@ import React, { useRef, useEffect, memo } from 'react'
 const CanvasWheel = memo(({ names, colors, rotation, width = 800, height = 800, centerImage = null, centerImageSize = 'M' }) => {
     const canvasRef = useRef(null)
     const centerImageLoadedRef = useRef(null)
+    const rotationRef = useRef(rotation)
+    const animationFrameRef = useRef(null)
+    const staticWheelCanvasRef = useRef(null) // Offscreen canvas for static wheel
+    const needsRedrawRef = useRef(true) // Track if static wheel needs to be redrawn
 
+    // Update rotation ref without triggering re-render
+    useEffect(() => {
+        rotationRef.current = rotation
+    }, [rotation])
+
+    // Setup canvas and static wheel (only when names/colors change, NOT rotation)
     useEffect(() => {
         const canvas = canvasRef.current
+        if (!canvas) return
+
         // Use optimized context settings for smooth animation
         const ctx = canvas.getContext('2d', {
             alpha: true,
@@ -13,48 +25,73 @@ const CanvasWheel = memo(({ names, colors, rotation, width = 800, height = 800, 
             willReadFrequently: false,
             powerPreference: 'high-performance' // Use dedicated GPU if available
         })
+
+        // Create offscreen canvas for static wheel (wheel without rotation)
+        const staticCanvas = document.createElement('canvas')
+        staticWheelCanvasRef.current = staticCanvas
+        const staticCtx = staticCanvas.getContext('2d', {
+            alpha: true,
+            desynchronized: true,
+            willReadFrequently: false,
+            powerPreference: 'high-performance'
+        })
+
         // Reduce DPR for many entries to improve performance
         const baseDpr = window.devicePixelRatio || 1
         const dpr = names.length > 2000 ? Math.min(baseDpr, 1.5) : baseDpr
 
+        let canvasWidth = width
+        let canvasHeight = height
+        let centerX = width / 2
+        let centerY = height / 2
+        let radius = Math.min(centerX, centerY) - 20
+
+        // Setup canvas size
+        const setupCanvas = () => {
+            const displayWidth = canvas.clientWidth || width
+            const displayHeight = canvas.clientHeight || height
+
+            canvasWidth = displayWidth
+            canvasHeight = displayHeight
+            centerX = displayWidth / 2
+            centerY = displayHeight / 2
+            radius = Math.min(centerX, centerY) - 20
+
+            // Set actual size in memory (scaled to account for extra pixel density)
+            // Setting width/height resets the context, so we need to reapply settings
+            canvas.width = displayWidth * dpr
+            canvas.height = displayHeight * dpr
+            staticCanvas.width = displayWidth * dpr
+            staticCanvas.height = displayHeight * dpr
+
+            // Normalize coordinate system to use css pixels
+            ctx.setTransform(1, 0, 0, 1, 0, 0) // Reset transform
+            ctx.scale(dpr, dpr)
+            staticCtx.setTransform(1, 0, 0, 1, 0, 0) // Reset transform
+            staticCtx.scale(dpr, dpr)
+            
+            // Enable image smoothing for better quality
+            ctx.imageSmoothingEnabled = true
+            ctx.imageSmoothingQuality = names.length > 1000 ? 'medium' : 'high'
+            staticCtx.imageSmoothingEnabled = true
+            staticCtx.imageSmoothingQuality = names.length > 1000 ? 'medium' : 'high'
+
+            needsRedrawRef.current = true
+        }
+
         // Throttle resize for better performance with many entries
         let resizeTimeout = null
         const handleResize = () => {
-            // Clear previous timeout
             if (resizeTimeout) {
                 clearTimeout(resizeTimeout)
             }
             
-            // Reduced throttling for smoother updates
             const throttleDelay = names.length > 5000 ? 100 : names.length > 2000 ? 50 : 0
             
             resizeTimeout = setTimeout(() => {
-                const displayWidth = canvas.clientWidth || width
-                const displayHeight = canvas.clientHeight || height
-
-                // Set actual size in memory (scaled to account for extra pixel density)
-                canvas.width = displayWidth * dpr
-                canvas.height = displayHeight * dpr
-
-                // Normalize coordinate system to use css pixels
-                ctx.scale(dpr, dpr)
-                
-                // Enable image smoothing for better quality
-                ctx.imageSmoothingEnabled = true
-                ctx.imageSmoothingQuality = 'high'
-                
-                // Performance optimizations for many entries
-                if (names.length > 1000) {
-                    // Reduce quality slightly for better performance with many entries
-                    ctx.imageSmoothingQuality = 'medium'
-                }
-
-                const centerX = displayWidth / 2
-                const centerY = displayHeight / 2
-                // FIXED 20px padding (Matches App.css)
-                const radius = Math.min(centerX, centerY) - 20
-
-                drawWheel(centerX, centerY, radius, displayWidth, displayHeight)
+                setupCanvas()
+                drawStaticWheel()
+                drawWheel()
             }, throttleDelay)
         }
 
@@ -62,57 +99,230 @@ const CanvasWheel = memo(({ names, colors, rotation, width = 800, height = 800, 
             handleResize()
         })
         resizeObserver.observe(canvas)
-        
-        // Throttle redraws during animation for better performance with many entries
-        let lastDrawTime = 0
-        const minDrawInterval = names.length > 2000 ? 16 : names.length > 1000 ? 8 : 0 // Throttle to ~60fps or ~120fps
-        
-        const throttledDraw = () => {
-            const now = performance.now()
-            if (now - lastDrawTime >= minDrawInterval) {
-                const displayWidth = canvas.clientWidth || width
-                const displayHeight = canvas.clientHeight || height
-                const centerX = displayWidth / 2
-                const centerY = displayHeight / 2
-                const radius = Math.min(centerX, centerY) - 20
-                drawWheel(centerX, centerY, radius, displayWidth, displayHeight)
-                lastDrawTime = now
+
+        // Draw static wheel (without rotation) to offscreen canvas
+        const drawStaticWheel = () => {
+            if (!staticWheelCanvasRef.current) return
+
+            // Clear static canvas - use CSS pixel dimensions (context is already scaled)
+            staticCtx.clearRect(0, 0, canvasWidth, canvasHeight)
+
+            const numSegments = names.length
+            const sliceAngle = (2 * Math.PI) / numSegments
+
+            const isManyEntries = names.length > 2000
+            const isVeryManyEntries = names.length > 5000
+            
+            if (isVeryManyEntries) {
+                staticCtx.imageSmoothingEnabled = false
             }
-        }
-        
-        // Initial draw
-        throttledDraw()
-        
-        // Use requestAnimationFrame for smooth updates
-        let rafId = null
-        const scheduleDraw = () => {
-            if (rafId) return
-            rafId = requestAnimationFrame(() => {
-                throttledDraw()
-                rafId = null
+
+            // Draw Shadow (behind the wheel) - Skip for many entries for performance
+            if (names.length < 2000) {
+                staticCtx.save()
+                staticCtx.shadowColor = 'rgba(0, 0, 0, 0.3)'
+                staticCtx.shadowBlur = 15
+                staticCtx.shadowOffsetY = 10
+                staticCtx.beginPath()
+                staticCtx.arc(centerX, centerY, radius, 0, 2 * Math.PI)
+                staticCtx.fillStyle = 'rgba(0,0,0,0)'
+                staticCtx.fill()
+                staticCtx.restore()
+            }
+
+            const shouldShowText = names.length < 500
+            const shouldDrawGradient = names.length < 300
+            const shouldDrawStrokes = names.length < 500
+            const minSliceAngleForText = names.length > 500 ? 0.01 : 0.001
+
+            // Use Path2D for better performance with many segments
+            const segmentPaths = []
+            
+            // Batch create paths first
+            for (let index = 0; index < names.length; index++) {
+                const startAngle = index * sliceAngle - Math.PI / 2
+                const endAngle = startAngle + sliceAngle
+                
+                const path = new Path2D()
+                path.moveTo(centerX, centerY)
+                path.arc(centerX, centerY, radius, startAngle, endAngle)
+                path.closePath()
+                segmentPaths.push({ path, index, startAngle, endAngle })
+            }
+
+            // Draw all segments
+            segmentPaths.forEach(({ path, index }) => {
+                staticCtx.fillStyle = colors[index % colors.length]
+                staticCtx.fill(path)
+
+                // Add gradient (skip for large lists)
+                if (shouldDrawGradient && !isManyEntries) {
+                    const gradient = staticCtx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius)
+                    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.1)')
+                    gradient.addColorStop(0.6, 'rgba(255, 255, 255, 0)')
+                    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.1)')
+                    staticCtx.fillStyle = gradient
+                    staticCtx.fill(path)
+                }
+
+                // Draw strokes
+                if (shouldDrawStrokes) {
+                    const strokeWidth = names.length > 500 ? 0.5 : 1
+                    staticCtx.lineWidth = strokeWidth
+                    staticCtx.strokeStyle = names.length > 500 ? 'rgba(0,0,0,0.05)' : 'rgba(0,0,0,0.1)'
+                    staticCtx.stroke(path)
+                }
             })
+
+            // Draw text (only if needed)
+            if (shouldShowText && sliceAngle >= minSliceAngleForText) {
+                segmentPaths.forEach(({ index, startAngle }) => {
+                    const name = names[index]
+                    const midAngle = startAngle + sliceAngle / 2
+                    
+                    staticCtx.save()
+                    staticCtx.translate(centerX, centerY)
+                    staticCtx.rotate(midAngle)
+
+                    staticCtx.textAlign = 'right'
+                    staticCtx.textBaseline = 'middle'
+
+                    const bgColor = colors[index % colors.length]
+                    staticCtx.fillStyle = (bgColor === '#efb71d' || bgColor === '#24a643') ? '#000000' : '#FFFFFF'
+
+                    const textRadius = radius - 20
+                    const arcLength = textRadius * sliceAngle
+                    const isMobile = window.innerWidth < 768
+                    let computedSize = arcLength / (isMobile ? 4.5 : 6)
+                    const minSize = isMobile ? 8 : 10
+                    const maxSize = isMobile ? 42 : 40
+                    let fontSize = Math.max(minSize, Math.min(maxSize, computedSize))
+
+                    staticCtx.font = `500 ${fontSize}px "Montserrat", sans-serif`
+                    staticCtx.shadowColor = 'rgba(0,0,0,0.2)'
+                    staticCtx.shadowBlur = 2
+                    staticCtx.shadowOffsetX = 1
+                    staticCtx.shadowOffsetY = 1
+
+                    let displayName = name
+                    if (names.length > 500 && name.length > 10) {
+                        displayName = name.substring(0, 10) + '...'
+                    }
+
+                    staticCtx.fillText(displayName, radius - 25, 0)
+                    staticCtx.restore()
+                })
+            }
+
+            // Draw Center Hub (static, no image rotation)
+            const isMobile = window.innerWidth < 768
+            const hubRadius = isMobile ? 35 : 70
+
+            staticCtx.beginPath()
+            staticCtx.arc(centerX, centerY, hubRadius, 0, 2 * Math.PI)
+            staticCtx.fillStyle = 'white'
+            staticCtx.shadowColor = 'rgba(0,0,0,0.2)'
+            staticCtx.shadowBlur = 5
+            staticCtx.fill()
+
+            needsRedrawRef.current = false
         }
-        
-        // Schedule draw when rotation changes (effect runs when rotation changes)
-        scheduleDraw()
+
+        // Draw wheel with rotation (composite static wheel + rotation)
+        const drawWheel = () => {
+            // Ensure we have valid dimensions
+            if (canvasWidth <= 0 || canvasHeight <= 0) {
+                return
+            }
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight)
+
+            // Draw static wheel with rotation
+            // The rotation value represents clockwise rotation in degrees
+            // Canvas rotate() rotates the coordinate system counter-clockwise for positive angles
+            // This makes objects drawn appear to rotate clockwise, which matches the calculation
+            // The calculation assumes: "When wheel rotates clockwise by R, what was at angle A is now at (A - R)"
+            // After rotating coordinate system counter-clockwise by R, a point originally at angle A appears at (A - R)
+            ctx.save()
+            ctx.translate(centerX, centerY)
+            ctx.rotate((rotationRef.current * Math.PI) / 180)
+            ctx.translate(-centerX, -centerY)
+            
+            // Draw the static wheel from offscreen canvas
+            // The static canvas has internal dimensions (canvasWidth * dpr, canvasHeight * dpr)
+            // The main canvas context is scaled by dpr, so we draw at CSS pixel dimensions
+            // Draw the full static canvas using its actual internal dimensions as source
+            if (staticWheelCanvasRef.current && staticWheelCanvasRef.current.width > 0 && staticWheelCanvasRef.current.height > 0) {
+                // Source: full static canvas (canvasWidth * dpr x canvasHeight * dpr)
+                // Destination: CSS pixel dimensions (canvasWidth x canvasHeight) - context handles DPR scaling
+                ctx.drawImage(
+                    staticWheelCanvasRef.current,
+                    0, 0, staticWheelCanvasRef.current.width, staticWheelCanvasRef.current.height, // Source: full canvas
+                    0, 0, canvasWidth, canvasHeight // Destination: CSS pixels (context is scaled)
+                )
+            } else {
+                // If static canvas not ready, draw directly (fallback)
+                needsRedrawRef.current = true
+                drawStaticWheel()
+                if (staticWheelCanvasRef.current && staticWheelCanvasRef.current.width > 0) {
+                    ctx.drawImage(staticWheelCanvasRef.current, 0, 0, canvasWidth, canvasHeight)
+                }
+            }
+            
+            // Draw center image with rotation (if provided)
+            if (centerImageLoadedRef.current && 
+                centerImageLoadedRef.current.complete && 
+                centerImageLoadedRef.current.naturalWidth > 0) {
+                try {
+                    const isMobile = window.innerWidth < 768
+                    const hubRadius = isMobile ? 35 : 70
+                    
+                    let imageRadius
+                    if (centerImageSize === 'S') {
+                        imageRadius = hubRadius * 0.7
+                    } else if (centerImageSize === 'L') {
+                        imageRadius = hubRadius * 1.3
+                    } else {
+                        imageRadius = hubRadius * 1.0
+                    }
+                    
+                    ctx.save()
+                    ctx.beginPath()
+                    ctx.arc(centerX, centerY, imageRadius, 0, 2 * Math.PI)
+                    ctx.clip()
+                    ctx.drawImage(
+                        centerImageLoadedRef.current, 
+                        centerX - imageRadius, 
+                        centerY - imageRadius, 
+                        imageRadius * 2, 
+                        imageRadius * 2
+                    )
+                    ctx.restore()
+                } catch (error) {
+                    console.error('Error drawing center image:', error)
+                }
+            }
+
+            ctx.restore()
+        }
+
+        // Animation loop - continuously redraw with current rotation
+        // Always draw to ensure visibility - the performance optimization is in the static wheel caching
+        const animate = () => {
+            drawWheel()
+            animationFrameRef.current = requestAnimationFrame(animate)
+        }
 
         // Load center image when it changes
         if (centerImage) {
-            // Only load if not already loaded or if URL changed
             if (!centerImageLoadedRef.current || centerImageLoadedRef.current.src !== centerImage) {
                 const img = new Image()
                 img.crossOrigin = 'anonymous'
                 img.onload = () => {
                     centerImageLoadedRef.current = img
-                    // Force immediate redraw after image loads
-                    setTimeout(() => {
-                        const displayWidth = canvas.clientWidth || width
-                        const displayHeight = canvas.clientHeight || height
-                        const centerX = displayWidth / 2
-                        const centerY = displayHeight / 2
-                        const radius = Math.min(centerX, centerY) - 20
-                        drawWheel(centerX, centerY, radius, displayWidth, displayHeight)
-                    }, 50)
+                    drawStaticWheel()
+                    drawWheel()
                 }
                 img.onerror = (error) => {
                     console.error('Failed to load center image:', centerImage, error)
@@ -126,201 +336,38 @@ const CanvasWheel = memo(({ names, colors, rotation, width = 800, height = 800, 
             centerImageLoadedRef.current = null
         }
 
-        // Initial Draw
-        handleResize()
-
-        // Helper to draw the wheel (extracted for reuse)
-        function drawWheel(centerX, centerY, radius, displayWidth, displayHeight) {
-            // Clear canvas
-            ctx.clearRect(0, 0, displayWidth, displayHeight)
-
-            const numSegments = names.length
-            const sliceAngle = (2 * Math.PI) / numSegments
-
-            // For many entries, use simpler rendering
-            const isManyEntries = names.length > 2000
-            const isVeryManyEntries = names.length > 5000
+        // Initial setup - use requestAnimationFrame to ensure canvas is ready
+        const initialize = () => {
+            const displayWidth = canvas.clientWidth || width
+            const displayHeight = canvas.clientHeight || height
             
-            // Save context for wheel rotation
-            ctx.save()
-            ctx.translate(centerX, centerY)
-            ctx.rotate((rotation * Math.PI) / 180)
-            
-            // For very many entries, disable expensive operations
-            if (isVeryManyEntries) {
-                ctx.imageSmoothingEnabled = false
+            if (displayWidth > 0 && displayHeight > 0) {
+                setupCanvas()
+                drawStaticWheel()
+                // Draw immediately to ensure visibility
+                drawWheel()
+                // Start animation loop
+                animationFrameRef.current = requestAnimationFrame(animate)
+            } else {
+                // Canvas not ready yet, try again next frame
+                animationFrameRef.current = requestAnimationFrame(initialize)
             }
-
-            // Draw Shadow (behind the wheel) - Skip for many entries for performance
-            if (names.length < 2000) {
-                ctx.save()
-                ctx.shadowColor = 'rgba(0, 0, 0, 0.3)'
-                ctx.shadowBlur = 15
-                ctx.shadowOffsetY = 10
-                ctx.beginPath()
-                ctx.arc(0, 0, radius, 0, 2 * Math.PI)
-                ctx.fillStyle = 'rgba(0,0,0,0)'
-                ctx.fill()
-                ctx.restore()
-            }
-
-            // Aggressive performance optimization for many entries (already declared above)
-            
-            // Performance optimization: Skip text rendering for very small slices
-            const minSliceAngleForText = names.length > 500 ? 0.01 : 0.001
-            
-            // For very many entries (500+), completely hide text for better performance
-            const shouldShowText = names.length < 500
-            
-            // Performance: Skip shadow for many entries
-            const shouldDrawShadow = names.length < 1000
-            
-            // Performance: Skip gradient for many entries (more aggressive for smooth spinning)
-            const shouldDrawGradient = names.length < 300
-            
-            // For very many entries, skip strokes entirely (more aggressive for smooth spinning)
-            const shouldDrawStrokes = names.length < 500
-            
-            // Batch draw segments for better performance
-            // For very large lists, skip expensive operations
-            names.forEach((name, index) => {
-                // 0 degrees in standard canvas is 3 o'clock. 
-                // We want index 0 to start at -90 degrees (12 o'clock)
-                const startAngle = index * sliceAngle - Math.PI / 2
-                const endAngle = startAngle + sliceAngle
-
-                // Draw Segment - optimized path (minimal operations)
-                ctx.beginPath()
-                ctx.moveTo(0, 0)
-                ctx.arc(0, 0, radius, startAngle, endAngle)
-                ctx.closePath()
-
-                ctx.fillStyle = colors[index % colors.length]
-                ctx.fill()
-
-                // Add "Shine" / Gradient Depth (skip for very large lists to improve performance)
-                if (shouldDrawGradient && !isManyEntries) {
-                    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, radius)
-                    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.1)')
-                    gradient.addColorStop(0.6, 'rgba(255, 255, 255, 0)')
-                    gradient.addColorStop(1, 'rgba(0, 0, 0, 0.1)')
-                    ctx.fillStyle = gradient
-                    ctx.fill()
-                }
-
-                // Adjust stroke width based on number of segments for better visibility
-                // For many entries, skip strokes entirely for performance
-                if (shouldDrawStrokes) {
-                    const strokeWidth = names.length > 500 ? 0.5 : 1
-                    ctx.lineWidth = strokeWidth
-                    ctx.strokeStyle = names.length > 500 ? 'rgba(0,0,0,0.05)' : 'rgba(0,0,0,0.1)'
-                    ctx.stroke()
-                }
-
-                // Draw Text only if slice is large enough and we should show text
-                if (shouldShowText && sliceAngle >= minSliceAngleForText) {
-                    ctx.save()
-                    const midAngle = startAngle + sliceAngle / 2
-                    ctx.rotate(midAngle)
-
-                    ctx.textAlign = 'right'
-                    ctx.textBaseline = 'middle'
-
-                    const bgColor = colors[index % colors.length]
-                    if (bgColor === '#efb71d' || bgColor === '#24a643') {
-                        ctx.fillStyle = '#000000'
-                    } else {
-                        ctx.fillStyle = '#FFFFFF'
-                    }
-
-                    // Dynamic font sizing
-                    const textRadius = radius - 20
-                    const arcLength = textRadius * sliceAngle
-                    const isMobile = window.innerWidth < 768
-                    let computedSize = arcLength / (isMobile ? 4.5 : 6)
-                    const minSize = isMobile ? 8 : 10 // Smaller min size for large lists
-                    const maxSize = isMobile ? 42 : 40
-                    let fontSize = Math.max(minSize, Math.min(maxSize, computedSize))
-
-                    ctx.font = `500 ${fontSize}px "Montserrat", sans-serif`
-
-                    ctx.shadowColor = 'rgba(0,0,0,0.2)'
-                    ctx.shadowBlur = 2
-                    ctx.shadowOffsetX = 1
-                    ctx.shadowOffsetY = 1
-
-                    // Truncate long names for very small slices
-                    let displayName = name
-                    if (names.length > 500 && name.length > 10) {
-                        displayName = name.substring(0, 10) + '...'
-                    }
-
-                    ctx.fillText(displayName, radius - 25, 0)
-                    ctx.restore()
-                }
-            })
-
-            // Draw Center Hub and Image INSIDE the rotation context (so image rotates with wheel)
-            const isMobile = window.innerWidth < 768
-            // Increased hub radius for bigger center circle
-            const hubRadius = isMobile ? 35 : 70
-
-            // Draw Center Circle (Hub) - Smaller on Mobile
-            ctx.beginPath()
-            ctx.arc(0, 0, hubRadius, 0, 2 * Math.PI)
-            ctx.fillStyle = 'white'
-            ctx.shadowColor = 'rgba(0,0,0,0.2)'
-            ctx.shadowBlur = 5
-            ctx.fill()
-            
-            // Draw center image if provided and loaded (INSIDE rotation context so it rotates with wheel)
-            if (centerImageLoadedRef.current && 
-                centerImageLoadedRef.current.complete && 
-                centerImageLoadedRef.current.naturalWidth > 0) {
-                try {
-                    // Calculate image size based on size setting
-                    // Increased image size to match bigger center circle
-                    let imageRadius
-                    if (centerImageSize === 'S') {
-                        imageRadius = hubRadius * 0.7 // Small (increased from 0.6)
-                    } else if (centerImageSize === 'L') {
-                        imageRadius = hubRadius * 1.3 // Large (increased from 1.2)
-                    } else {
-                        imageRadius = hubRadius * 1.0 // Medium (increased from 0.9 to fill circle better)
-                    }
-                    
-                    // Draw image in center circle (will rotate with wheel since we're inside rotation context)
-                    ctx.save()
-                    ctx.beginPath()
-                    ctx.arc(0, 0, imageRadius, 0, 2 * Math.PI)
-                    ctx.clip()
-                    // Draw image centered
-                    ctx.drawImage(
-                        centerImageLoadedRef.current, 
-                        -imageRadius, 
-                        -imageRadius, 
-                        imageRadius * 2, 
-                        imageRadius * 2
-                    )
-                    ctx.restore()
-                } catch (error) {
-                    console.error('Error drawing center image:', error)
-                }
-            }
-
-            ctx.restore()
         }
+        
+        // Start initialization
+        animationFrameRef.current = requestAnimationFrame(initialize)
 
         return () => {
             resizeObserver.disconnect()
             if (resizeTimeout) {
                 clearTimeout(resizeTimeout)
             }
-            if (rafId) {
-                cancelAnimationFrame(rafId)
+            if (animationFrameRef.current) {
+                cancelAnimationFrame(animationFrameRef.current)
+                animationFrameRef.current = null
             }
         }
-    }, [names, colors, rotation, width, height, centerImage, centerImageSize])
+    }, [names, colors, width, height, centerImage, centerImageSize]) // Removed rotation from dependencies
 
     return (
         <canvas
