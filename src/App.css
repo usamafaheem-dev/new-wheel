@@ -1278,13 +1278,18 @@ body {
     height: auto;
     aspect-ratio: 1;
     margin: 0 auto;
+    background: transparent !important;
   }
 
   .wheel-pointer {
-    /* Fixed position - same on all screens - arrow tip touches wheel edge */
-    right: 56px !important;
-    width: 40px !important;
-    height: 40px !important;
+    /* Smaller arrow on mobile - properly attached to wheel */
+    right: -5px !important;
+    width: 25px !important;
+    height: 25px !important;
+  }
+  
+  .wheel-container {
+    background: transparent !important;
   }
 
   .right-sidebar {
@@ -1305,10 +1310,10 @@ body {
   }
 
   .wheel-pointer {
-    /* Fixed position - same on all screens - arrow tip touches wheel edge */
-    right: 56px !important;
-    width: 40px !important;
-    height: 40px !important;
+    /* Smaller arrow on mobile - properly attached to wheel */
+    right: -5px !important;
+    width: 25px !important;
+    height: 25px !important;
   }
 
   .right-sidebar {
@@ -1338,6 +1343,12 @@ body {
 
   .wheel-container {
     padding: 15px;
+    background: transparent !important;
+  }
+  
+  /* Remove any black background on mobile */
+  .wheel-wrapper {
+    background: transparent !important;
   }
 }
 
@@ -1347,10 +1358,10 @@ body {
   }
 
   .wheel-pointer {
-    /* Fixed position - same on all screens - arrow tip touches wheel edge */
-    right: 56px !important;
-    width: 40px !important;
-    height: 40px !important;
+    /* Smaller arrow on mobile - properly attached to wheel */
+    right: -5px !important;
+    width: 25px !important;
+    height: 25px !important;
   }
 
   .right-sidebar {
@@ -1363,6 +1374,15 @@ body {
 
   .header-btn {
     padding: 6px 8px;
+  }
+  
+  /* Remove any black background on mobile */
+  .wheel-container {
+    background: transparent !important;
+  }
+  
+  .wheel-wrapper {
+    background: transparent !important;
   }
 }
 

@@ -5,6 +5,7 @@ import './App.css'
 import CanvasWheel from './components/CanvasWheel'
 import AdminPanel from './components/AdminPanel'
 import { getActiveFiles, getStoredFiles } from './utils/storage'
+import { getSpinFiles } from './services/api'
 
 function App() {
   const [names, setNames] = useState([
@@ -1470,12 +1471,30 @@ function App() {
     setSpinModes({})
   }
 
-  // Load spin files from localStorage on mount
+  // Load spin files from backend API (with localStorage fallback) on mount
   useEffect(() => {
-    const loadSpinFiles = () => {
+    const loadSpinFiles = async () => {
       try {
         setLoadingSpinFiles(true)
-        const files = getActiveFiles() // Get active files from localStorage
+        let files = []
+        
+        // Try to load from backend API first
+        try {
+          const backendFiles = await getSpinFiles()
+          if (backendFiles && Array.isArray(backendFiles)) {
+            files = backendFiles.filter(f => f.active !== false) // Filter active files
+          }
+        } catch (backendError) {
+          console.warn('Failed to load from backend, falling back to localStorage:', backendError)
+          // Fallback to localStorage if backend fails
+          files = getActiveFiles()
+        }
+        
+        // If backend didn't return files, use localStorage
+        if (files.length === 0) {
+          files = getActiveFiles()
+        }
+        
         setSpinFiles(files)
         
         // If files are available and no file is currently selected, select the first one
@@ -1492,6 +1511,13 @@ function App() {
         }
       } catch (error) {
         console.error('Failed to load spin files:', error)
+        // Fallback to localStorage on error
+        try {
+          const files = getActiveFiles()
+          setSpinFiles(files)
+        } catch (fallbackError) {
+          console.error('Failed to load from localStorage:', fallbackError)
+        }
       } finally {
         setLoadingSpinFiles(false)
       }
