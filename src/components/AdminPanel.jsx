@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { FiUpload, FiX, FiFile, FiImage, FiCheck, FiAlertCircle, FiSearch, FiSend, FiLogOut, FiShuffle, FiRefreshCw } from 'react-icons/fi'
 import { parseExcelFile, imageToBase64 } from '../utils/excelParser'
-import { getStoredFiles, saveFile, deleteFile, getFileById, getActiveFiles, toggleFileActive, checkPassword as checkPasswordLocal, setPassword as setPasswordLocal } from '../utils/storage'
 import { uploadSpinFile, deleteSpinFile, getAdminSpinFiles } from '../services/api'
 
 const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
@@ -112,50 +111,31 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
     }
   }, [isAuthenticated])
   
-  // Load upload rows from backend API
+  // Load upload rows from backend API only
   const loadUploadRows = async () => {
     setLoadingFiles(true)
     try {
-      // Try to load from backend API first
-      try {
-        const backendFiles = await getAdminSpinFiles()
-        if (backendFiles && Array.isArray(backendFiles)) {
-          setUploadRows(
-            backendFiles.map((file) => ({
-              id: file.id,
-              image: null,
-              imagePreview: file.picture || null, // This is the center image that appears in wheel
-              dataFile: null,
-              fileName: file.filename,
-              active: file.active !== false, // Default to true if not set
-              ticketNumber: file.ticketNumber || '', // Load ticket number from saved file
-              picture: file.picture || null, // Store picture for when file is selected
-            }))
-          )
-          setLoadingFiles(false)
-          return
-        }
-      } catch (backendError) {
-        console.warn('Failed to load from backend, falling back to localStorage:', backendError)
+      const backendFiles = await getAdminSpinFiles()
+      if (backendFiles && Array.isArray(backendFiles)) {
+        setUploadRows(
+          backendFiles.map((file) => ({
+            id: file.id,
+            image: null,
+            imagePreview: file.picture || null, // This is the center image that appears in wheel
+            dataFile: null,
+            fileName: file.filename,
+            active: file.active !== false, // Default to true if not set
+            ticketNumber: file.ticketNumber || '', // Load ticket number from saved file
+            picture: file.picture || null, // Store picture for when file is selected
+          }))
+        )
+      } else {
+        setUploadRows([])
       }
-      
-      // Fallback to localStorage if backend fails
-      const localFiles = getStoredFiles()
-      setUploadRows(
-        localFiles.map((file) => ({
-          id: file.id,
-          image: null,
-          imagePreview: file.picture || null, // This is the center image that appears in wheel
-          dataFile: null,
-          fileName: file.filename,
-          active: file.active !== false, // Default to true if not set
-          ticketNumber: file.ticketNumber || '', // Load ticket number from saved file
-          picture: file.picture || null, // Store picture for when file is selected
-        }))
-      )
     } catch (err) {
-      console.error('Error loading files:', err)
+      console.error('Error loading files from backend:', err)
       setUploadRows([])
+      setError('Failed to load files from server. Please check your internet connection.')
     } finally {
       setLoadingFiles(false)
     }
@@ -254,20 +234,14 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
   // Delete row
   const handleDeleteRow = async (id) => {
     try {
-      // Try to delete from backend API first
-      try {
-        await deleteSpinFile(id)
-      } catch (backendError) {
-        console.warn('Failed to delete from backend, trying localStorage:', backendError)
-        // Fallback to localStorage if backend fails
-        deleteFile(id)
-      }
+      await deleteSpinFile(id)
       setUploadRows((prev) => prev.filter((row) => row.id !== id))
       // Reload entries to reflect deletion
       await loadEntries()
+      setSuccess('File deleted successfully!')
     } catch (error) {
       console.error('Error deleting file:', error)
-      setError('Failed to delete file')
+      setError('Failed to delete file: ' + (error.message || 'Unknown error'))
     }
   }
   
@@ -316,43 +290,9 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
               }
             }
           } catch (backendError) {
-            console.warn('Backend upload failed, falling back to localStorage:', backendError)
-            
-            // Fallback to localStorage if backend fails
-            const jsonContent = await parseExcelFile(row.dataFile)
-            let pictureBase64 = null
-            
-            // Convert image to base64 if provided
-            if (row.image) {
-              pictureBase64 = await imageToBase64(row.image)
-            }
-            
-            // Save to localStorage with picture as base64 (so it appears in center of wheel)
-            const fileData = {
-              id: row.id || `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-              filename: row.fileName || 'Untitled',
-              json_content: jsonContent,
-              picture: pictureBase64, // Center image for wheel
-              active: row.active !== false, // Default to true
-              ticketNumber: row.ticketNumber ? row.ticketNumber.trim() : '', // Save ticket number for fixed wheel functionality
-              createdAt: new Date().toISOString()
-            }
-            
-            saveFile(fileData)
-            uploadedFiles.push(fileData)
-            
-            // Update the row with the new ID and mark as uploaded (remove dataFile)
-            const rowIndex = updatedRows.findIndex(r => r.id === row.id)
-            if (rowIndex !== -1) {
-              updatedRows[rowIndex] = {
-                ...updatedRows[rowIndex],
-                id: fileData.id,
-                dataFile: null, // Clear dataFile to mark as uploaded
-                image: null, // Clear image file (keep imagePreview)
-                imagePreview: pictureBase64 || row.imagePreview, // Keep preview
-                picture: pictureBase64 || row.picture // Store picture
-              }
-            }
+            console.error(`Backend upload failed for ${row.fileName}:`, backendError)
+            setError(`Upload failed for ${row.fileName}: ${backendError.message || 'Unknown error'}`)
+            continue
           }
         } catch (uploadError) {
           console.error(`Upload failed for ${row.fileName}:`, uploadError)
@@ -640,50 +580,25 @@ const AdminPanel = ({ onClose, onFileUploaded, onGoToWheel }) => {
     setIsLoadingEntries(true)
     setError('')
     try {
-      // Try to load files from backend API first
-      let files = []
-      try {
-        const backendFiles = await getAdminSpinFiles()
-        if (backendFiles && Array.isArray(backendFiles)) {
-          files = backendFiles
-          // Sync backend data to localStorage for offline support
-          backendFiles.forEach(file => {
-            try {
-              saveFile(file) // Save to localStorage
-            } catch (e) {
-              console.warn('Failed to sync file to localStorage:', e)
-            }
-          })
-          console.log('📥 Files loaded from backend API:', {
-            totalFiles: files.length,
-            filesInfo: files.map(f => ({
-              id: f.id,
-              filename: f.filename || f.name,
-              jsonContentLength: f.json_content?.length || 0,
-              hasJsonContent: !!f.json_content,
-              isArray: Array.isArray(f.json_content)
-            }))
-          })
-        }
-      } catch (backendError) {
-        console.warn('Failed to load from backend, falling back to localStorage:', backendError)
-        // Fallback to localStorage if backend fails
-        files = getStoredFiles()
-        console.log('📥 Files loaded from localStorage (fallback):', {
-          totalFiles: files.length
-        })
+      // Load files from backend API only
+      const backendFiles = await getAdminSpinFiles()
+      if (!backendFiles || !Array.isArray(backendFiles) || backendFiles.length === 0) {
+        setError('No files found. Please upload an Excel file.')
+        setIsLoadingEntries(false)
+        return
       }
       
-      // If no files from backend, try localStorage
-      if (!files || files.length === 0) {
-        files = getStoredFiles()
-        if (!files || files.length === 0) {
-          // Don't clear existing entries if no files found - just show error
-          setError('No files found. Please upload an Excel file.')
-          setIsLoadingEntries(false)
-          return
-        }
-      }
+      const files = backendFiles
+      console.log('📥 Files loaded from backend API:', {
+        totalFiles: files.length,
+        filesInfo: files.map(f => ({
+          id: f.id,
+          filename: f.filename || f.name,
+          jsonContentLength: f.json_content?.length || 0,
+          hasJsonContent: !!f.json_content,
+          isArray: Array.isArray(f.json_content)
+        }))
+      })
       
       // Get removed entries from localStorage
       const removedEntries = getRemovedEntries()

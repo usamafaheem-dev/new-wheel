@@ -4,7 +4,6 @@ import { FiSettings, FiFile, FiFolder, FiSave, FiShare2, FiSearch, FiMaximize, F
 import './App.css'
 import CanvasWheel from './components/CanvasWheel'
 import AdminPanel from './components/AdminPanel'
-import { getActiveFiles, getStoredFiles } from './utils/storage'
 import { getSpinFiles } from './services/api'
 
 function App() {
@@ -1471,53 +1470,35 @@ function App() {
     setSpinModes({})
   }
 
-  // Load spin files from backend API (with localStorage fallback) on mount
+  // Load spin files from backend API only
   useEffect(() => {
     const loadSpinFiles = async () => {
       try {
         setLoadingSpinFiles(true)
-        let files = []
-        
-        // Try to load from backend API first
-        try {
-          const backendFiles = await getSpinFiles()
-          if (backendFiles && Array.isArray(backendFiles)) {
-            files = backendFiles.filter(f => f.active !== false) // Filter active files
+        const backendFiles = await getSpinFiles()
+        if (backendFiles && Array.isArray(backendFiles)) {
+          const files = backendFiles.filter(f => f.active !== false) // Filter active files
+          setSpinFiles(files)
+          
+          // If files are available and no file is currently selected, select the first one
+          if (files.length > 0 && !selectedSpinFile) {
+            const firstFile = files[0]
+            setCurrentFileIndex(0)
+            handleSelectSpinFile(firstFile)
+          } else if (files.length > 0 && selectedSpinFile) {
+            // If a file is already selected, find its index
+            const currentIndex = files.findIndex(f => f.id === selectedSpinFile.id)
+            if (currentIndex !== -1) {
+              setCurrentFileIndex(currentIndex)
+            }
           }
-        } catch (backendError) {
-          console.warn('Failed to load from backend, falling back to localStorage:', backendError)
-          // Fallback to localStorage if backend fails
-          files = getActiveFiles()
-        }
-        
-        // If backend didn't return files, use localStorage
-        if (files.length === 0) {
-          files = getActiveFiles()
-        }
-        
-        setSpinFiles(files)
-        
-        // If files are available and no file is currently selected, select the first one
-        if (files.length > 0 && !selectedSpinFile) {
-          const firstFile = files[0]
-          setCurrentFileIndex(0)
-          handleSelectSpinFile(firstFile)
-        } else if (files.length > 0 && selectedSpinFile) {
-          // If a file is already selected, find its index
-          const currentIndex = files.findIndex(f => f.id === selectedSpinFile.id)
-          if (currentIndex !== -1) {
-            setCurrentFileIndex(currentIndex)
-          }
+        } else {
+          setSpinFiles([])
         }
       } catch (error) {
-        console.error('Failed to load spin files:', error)
-        // Fallback to localStorage on error
-        try {
-          const files = getActiveFiles()
-          setSpinFiles(files)
-        } catch (fallbackError) {
-          console.error('Failed to load from localStorage:', fallbackError)
-        }
+        console.error('Failed to load spin files from backend:', error)
+        setSpinFiles([])
+        alert('Failed to load files from server. Please check your internet connection.')
       } finally {
         setLoadingSpinFiles(false)
       }
@@ -2168,29 +2149,12 @@ function App() {
       if (backendFiles && Array.isArray(backendFiles)) {
         const activeFiles = backendFiles.filter(f => f.active !== false)
         setSpinFiles(activeFiles)
-        // Sync to localStorage for offline support
-        const { saveFile } = require('./utils/storage')
-        backendFiles.forEach(file => {
-          try {
-            saveFile(file)
-          } catch (e) {
-            console.warn('Failed to sync file to localStorage:', e)
-          }
-        })
       } else {
-        // Fallback to localStorage
-        const files = getActiveFiles()
-        setSpinFiles(files)
+        setSpinFiles([])
       }
     } catch (error) {
-      console.error('Failed to reload files list from backend, using localStorage:', error)
-      // Fallback to localStorage
-      try {
-        const files = getActiveFiles()
-        setSpinFiles(files)
-      } catch (fallbackError) {
-        console.error('Failed to reload files list:', fallbackError)
-      }
+      console.error('Failed to reload files list from backend:', error)
+      setSpinFiles([])
     }
       
       // Auto-select the uploaded file and load its data onto the wheel
@@ -2201,18 +2165,9 @@ function App() {
         if (backendFiles && Array.isArray(backendFiles)) {
           const activeFiles = backendFiles.filter(f => f.active !== false)
           setSpinFiles(activeFiles)
-          // Sync to localStorage for offline support
-          backendFiles.forEach(file => {
-            try {
-              const { saveFile } = require('./utils/storage')
-              saveFile(file)
-            } catch (e) {
-              console.warn('Failed to sync file to localStorage:', e)
-            }
-          })
         }
       } catch (backendError) {
-        console.warn('Failed to reload from backend:', backendError)
+        console.error('Failed to reload from backend:', backendError)
       }
       
       // Check if file has json_content (required for loading entries)
@@ -2241,24 +2196,12 @@ function App() {
             })
             handleSelectSpinFile(fileToLoad)
           } else {
-            // Fallback to localStorage
-            const adminFiles = getStoredFiles()
-            const fileToLoad = adminFiles.find(f => f.id === uploadedFile.id)
-            if (fileToLoad && fileToLoad.json_content && Array.isArray(fileToLoad.json_content)) {
-              console.log('Found file in localStorage, loading:', {
-                fileId: fileToLoad.id,
-                entriesCount: fileToLoad.json_content.length
-              })
-              handleSelectSpinFile(fileToLoad)
-            } else {
-              console.error('File not found or missing json_content:', {
-                fileId: uploadedFile.id,
-                foundInBackend: !!backendFiles?.find(f => f.id === uploadedFile.id),
-                foundInLocal: !!fileToLoad,
-                hasJsonContent: !!fileToLoad?.json_content
-              })
-              alert('Failed to load file: File data not available. Please try selecting the file manually from the dropdown.')
-            }
+            console.error('File not found or missing json_content in backend:', {
+              fileId: uploadedFile.id,
+              foundInBackend: !!backendFiles?.find(f => f.id === uploadedFile.id),
+              hasJsonContent: !!backendFiles?.find(f => f.id === uploadedFile.id)?.json_content
+            })
+            alert('Failed to load file: File data not available. Please try selecting the file manually from the dropdown.')
           }
         } catch (error) {
           console.error('Failed to load file from backend:', error)
